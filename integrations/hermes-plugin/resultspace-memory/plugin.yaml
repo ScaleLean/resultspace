@@ -1,0 +1,11 @@
+name: resultspace-memory
+version: 0.8.0
+description: >-
+  ResultSpace memory provider: business facts live in ResultSpace (recall per turn, agent-learned
+  knowledge from conversations and mirrored MEMORY.md business facts). Needs the `resultspace`
+  plugin installed next to it. Activate with memory.provider: resultspace-memory.
+author: ResultSpace contributors
+kind: exclusive
+manifest_version: 1
+requires_hermes: ">=0.21"
+provides_tools: [rs_recall, rs_remember]

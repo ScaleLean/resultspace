@@ -1,0 +1,7 @@
+{
+  "name": "resultspace-web",
+  "private": true,
+  "type": "module",
+  "description": "Not installed on its own (dependencies are in ../package.json). It exists because vite runs in web/ and adapter-node reads ./package.json, and to map #lib/* to web/lib/*.",
+  "imports": { "#lib/*": "./lib/*" }
+}

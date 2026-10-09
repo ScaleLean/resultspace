@@ -1,0 +1,10 @@
+node_modules/
+*.sqlite
+*.sqlite-*
+/data/
+
+# web app build output
+/build/
+/web/.svelte-kit/
+__pycache__/
+*.pyc

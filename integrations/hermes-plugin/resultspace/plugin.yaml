@@ -1,0 +1,19 @@
+name: resultspace
+version: 0.14.0
+description: >-
+  ResultSpace for Hermes: the company brief at session start, business memory in ResultSpace
+  (memory provider), a log of outward actions (never blocks), automatic receipts and assignment
+  hand-off. ResultSpace owns business facts; Hermes keeps craft.
+author: ResultSpace contributors
+kind: standalone
+manifest_version: 1
+requires_hermes: ">=0.21"
+provides_tools: [rs_recall, rs_remember, rs_act, rs_work]
+provides_hooks: [pre_tool_call, post_tool_call, on_session_start, on_session_end]
+config_schema:
+  server_url: {type: str, description: "Override the rs server URL (default: the profile's rs config)"}
+  guard: {type: bool, default: true, description: "Record outward actions in ResultSpace (never blocks)"}
+  receipts: {type: bool, default: true, description: "Write a compact activity trail to Autopilot"}
+  brief_chars: {type: int, default: 3500, description: "Size budget of the session-start brief"}
+  cache_ttl_seconds: {type: int, default: 30, description: "How long a brief is cached"}
+  guard_patterns: {type: list, description: "Extra outward-action patterns: [{action, pattern, tool?, write?}]"}

@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "esnext", "module": "esnext", "moduleResolution": "bundler", "lib": ["esnext", "DOM", "DOM.Iterable"],
+    "strict": true, "noEmit": true, "skipLibCheck": true, "allowImportingTsExtensions": true, "verbatimModuleSyntax": true,
+    "isolatedModules": true, "types": ["node"], "rootDirs": [".", "./.svelte-kit/types"]
+  },
+  "include": [".svelte-kit/ambient.d.ts", ".svelte-kit/non-ambient.d.ts", ".svelte-kit/types/**/$types.d.ts", "app.d.ts", "hooks.server.ts", "lib/**/*.ts", "lib/**/*.svelte", "routes/**/*.ts", "routes/**/*.svelte"]
+}
