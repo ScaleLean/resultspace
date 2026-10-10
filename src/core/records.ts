@@ -1,8 +1,9 @@
 // Records of one company: the current version, every past version, links between records, and search.
 // Nothing here deletes. Every change adds one row to `revisions`, in the same transaction as the change.
 import { randomBytes } from "node:crypto";
+import { listAgents, type Role } from "./agents.ts";
 import type { Company } from "./company.ts";
-import { conflict, invalid, notFound } from "./errors.ts";
+import { conflict, forbidden, invalid, notFound } from "./errors.ts";
 import { getKind } from "./kinds.ts";
 import { canonicalKind, LEGACY_FIELDS, type EntryType, type KindDef } from "./schema.ts";
 
@@ -16,7 +17,7 @@ export type Revision = {
   changed: string[]; op: string; op_id: string | null; actor: string; actor_kind: string; at: string; why: string | null;
 };
 /** Who is writing. Stored on every revision. */
-export type Who = { name: string; kind: string };
+export type Who = { name: string; kind: string; role?: Role };
 export type WriteMeta = { why?: string | undefined; opId?: string | undefined };
 
 type RecRow = Omit<Rec, "body" | "archived"> & { body: string; archived: number };
@@ -158,6 +159,111 @@ export function links(co: Company, ref: string): { out: Link[]; in: Link[] } {
 
 // ---- Writes ----
 
+// Generic writes deliberately accept only assignment metadata. Lifecycle handlers have a separate
+// internal entry point; neither operation input nor WriteMeta can opt into that path.
+const ASSIGNMENT_METADATA = new Set(["title", "brief", "due_on", "project_id", "owner"]);
+
+function assignmentOwner(co: Company, body: Body): void {
+  const owner = body.owner;
+  if (typeof owner !== "string" || !owner) throw invalid("an assignment needs an owner (an agent's name)");
+  if (owner !== "curator" && !listAgents(co).some((a) => a.name === owner && a.active)) throw invalid(`no active agent ${owner} in this company`);
+}
+
+function assignmentWriter(who: Who, cur: Rec): void {
+  if (who.role === "viewer" || (cur.body.owner !== who.name && who.role !== "admin"))
+    throw forbidden(`${cur.key} belongs to ${String(cur.body.owner)}`);
+}
+
+// Tasks have direct authority only. Entries retain their own authority in server-owned metadata;
+// about-links never transfer authority back onto the referenced shared record.
+function directAssignment(co: Company, body: Body): Rec | undefined {
+  const resolve = (ref: unknown): Rec | undefined => {
+    if (ref === undefined || ref === null || ref === "") return;
+    const target = typeof ref === "string" ? get(co, ref) : undefined;
+    if (!target || target.kind !== "assignment") throw forbidden("cannot resolve assignment evidence authority");
+    return target;
+  };
+  const assignment = resolve(body.assignment_id);
+  const legacy = resolve(body.work_order_id);
+  if (assignment && legacy && assignment.id !== legacy.id)
+    throw invalid("work_order_id is the old name of assignment_id: give one of them");
+  return assignment ?? legacy;
+}
+
+function evidenceAssignments(co: Company, body: Body): string[] {
+  const ids: string[] = [];
+  const direct = directAssignment(co, body);
+  if (direct) ids.push(direct.id);
+  if (body.type === "outcome" && typeof body.about_id === "string") {
+    const about = get(co, body.about_id);
+    if (about?.kind === "assignment") ids.push(about.id);
+    else if (about) {
+      const linked = directAssignment(co, about.body);
+      if (linked) ids.push(linked.id);
+    }
+  }
+  return ids;
+}
+
+function entryAuthority(co: Company, cur: Rec): string[] {
+  const cached = co.one<{ assignment_ids: string }>("select assignment_ids from evidence_authority where record_id = ?", cur.id);
+  if (cached) return JSON.parse(cached.assignment_ids) as string[];
+  // One-time legacy initialization. A link lasts until the next association change, including
+  // a detached/null revision; repeated links must never bridge those gaps.
+  const ids: string[] = [];
+  const history = co.all<Body & { seq: number }>(`select seq,
+    json_extract(body, '$.assignment_id') as assignment_id, json_extract(body, '$.work_order_id') as work_order_id,
+    json_extract(body, '$.about_id') as about_id, json_extract(body, '$.type') as type
+    from revisions where record_id = ? order by rev`, cur.id);
+  const links = history.filter((link, i) => i === 0 || stable([link.assignment_id, link.work_order_id, link.about_id, link.type]) !==
+    stable([history[i - 1]!.assignment_id, history[i - 1]!.work_order_id, history[i - 1]!.about_id, history[i - 1]!.type]));
+  for (const [i, link] of links.entries()) {
+    const direct = directAssignment(co, link);
+    if (direct) ids.push(direct.id);
+    if (link.type !== "outcome" || typeof link.about_id !== "string") continue;
+    const about = get(co, link.about_id);
+    if (about?.kind === "assignment") ids.push(about.id);
+    else if (about) {
+      const refs = co.all<Body>(`select distinct json_extract(body, '$.assignment_id') as assignment_id,
+        json_extract(body, '$.work_order_id') as work_order_id from revisions where record_id = ? and (? is null or seq < ?)
+        and (seq >= ? or rev = (select max(rev) from revisions where record_id = ? and seq <= ?))`,
+        about.id, links[i + 1]?.seq ?? null, links[i + 1]?.seq ?? null, link.seq, about.id, link.seq);
+      for (const ref of refs) { const target = directAssignment(co, ref); if (target) ids.push(target.id); }
+    }
+  }
+  return [...new Set(ids)];
+}
+
+function rememberEntryAuthority(co: Company, id: string, ids: string[]): void {
+  co.run("insert into evidence_authority (record_id, assignment_ids) values (?, ?) on conflict (record_id) do update set assignment_ids = excluded.assignment_ids",
+    id, JSON.stringify([...new Set(ids)].sort()));
+}
+
+function evidenceWriter(co: Company, who: Who, kind: string, body: Body, cur?: Rec, previous?: string[]): string[] {
+  if (kind !== "entry" && kind !== "task") return [];
+  const ids = kind === "entry"
+    ? [...(previous ?? (cur ? entryAuthority(co, cur) : [])), ...evidenceAssignments(co, body)]
+    : [directAssignment(co, body)?.id].filter((id): id is string => !!id);
+  for (const id of new Set(ids)) assignmentWriter(who, need(co, id));
+  return ids;
+}
+
+function preserveTaskOutcomes(co: Company, cur: Rec, next: Body): void {
+  if (cur.kind !== "task" || directAssignment(co, cur.body)?.id === directAssignment(co, next)?.id) return;
+  // links_by_target selects only entries about this task, including archived entries. Capturing
+  // authority changes no evidence body or revision and never restricts writes to a shared task.
+  const entries = co.all<{ id: string }>(`select r.id from links l join records r on r.id = l.from_id
+    where l.to_id = ? and l.label = 'about' and r.kind = 'entry' and json_extract(r.body, '$.type') = 'outcome'`, cur.id);
+  for (const { id } of entries) {
+    const entry = need(co, id);
+    rememberEntryAuthority(co, id, [...entryAuthority(co, entry), ...evidenceAssignments(co, entry.body)]);
+  }
+}
+
+function assignmentMetadata(fields: string[]): void {
+  if (fields.some((f) => !ASSIGNMENT_METADATA.has(f))) throw forbidden("use assignment operations to change assignment lifecycle fields");
+}
+
 function nextKey(co: Company, prefix: string): string {
   const n = co.one<{ next_n: number }>("select next_n from key_counters where prefix = ?", prefix)?.next_n ?? 1;
   co.run("insert into key_counters (prefix, next_n) values (?, ?) on conflict (prefix) do update set next_n = excluded.next_n", prefix, n + 1);
@@ -244,10 +350,23 @@ export function create(co: Company, who: Who, kindName: string, body: Body, m: W
   return co.tx(() => {
     const kind = getKind(co, kindName);
     if (!kind) throw invalid(`unknown kind: ${kindName}`);
-    const clean = checked(co, kind, modernFields(body), null);
+    let normalized = modernFields(body);
+    if (kind.kind === "assignment") {
+      if (who.kind !== "person" && who.kind !== "curator" && who.role !== "admin")
+        throw forbidden("only a person, admin or Curator creates assignments");
+      if (who.role === "viewer") throw forbidden("creating assignments needs the member role");
+      assignmentMetadata(Object.keys(normalized).filter((f) => f !== "status"));
+      if ("status" in normalized && normalized.status !== "queued") throw forbidden("new assignments must be queued");
+      assignmentOwner(co, normalized);
+      normalized = { ...normalized, status: "queued" };
+    }
+    const clean = checked(co, kind, normalized, null);
+    const authority = evidenceWriter(co, who, kind.kind, clean);
     const at = new Date().toISOString();
     const r: Rec = { id: uuidv7(), key: nextKey(co, kind.prefix), kind: kind.kind, rev: 1, body: clean, archived: false, created_at: at, updated_at: at, updated_by: who.name };
-    return store(co, r, kind, "create", changedFields({}, clean), who, m, true);
+    store(co, r, kind, "create", changedFields({}, clean), who, m, true);
+    if (kind.kind === "entry") rememberEntryAuthority(co, r.id, authority);
+    return r;
   });
 }
 
@@ -256,13 +375,36 @@ export function create(co: Company, who: Who, kindName: string, body: Body, m: W
  * record has moved on since that revision. A patch that changes nothing writes nothing.
  */
 export function patch(co: Company, who: Who, ref: string, set: Body, m: WriteMeta & { baseRev?: number | undefined } = {}): Rec {
+  return patchRecord(co, who, ref, set, m, false);
+}
+
+/** Internal write path for assignment handlers, after their transition/person checks. */
+export function patchAssignment(co: Company, who: Who, ref: string, set: Body, m: WriteMeta = {}): Rec {
+  return patchRecord(co, who, ref, set, m, true);
+}
+
+function patchRecord(co: Company, who: Who, ref: string, set: Body, m: WriteMeta & { baseRev?: number | undefined }, lifecycle: boolean): Rec {
   return co.tx(() => {
     const cur = need(co, ref);
+    const priorAuthority = evidenceWriter(co, who, cur.kind, cur.body, cur);
+    const normalized = modernFields(set);
+    if (lifecycle && cur.kind !== "assignment") throw invalid(`${cur.key} is not an assignment`);
+    if (cur.kind === "assignment") {
+      assignmentWriter(who, cur);
+      if (cur.archived) throw invalid(`${cur.key} is archived: restore it first`);
+      if (!lifecycle) assignmentMetadata(Object.keys(normalized));
+      if ("owner" in normalized && normalized.owner !== cur.body.owner && who.role !== "admin")
+        throw forbidden("only an admin reassigns an assignment");
+    }
     if (m.baseRev !== undefined && m.baseRev !== cur.rev) throw conflict(`${cur.key} is at revision ${cur.rev}, not ${m.baseRev}: read it again`);
     const kind = getKind(co, cur.kind)!;
     const next: Body = { ...cur.body };
-    for (const [k, v] of Object.entries(modernFields(set))) { if (v === null) delete next[k]; else next[k] = v; }
+    for (const [k, v] of Object.entries(normalized)) { if (v === null) delete next[k]; else next[k] = v; }
+    if (cur.kind === "assignment" && "owner" in normalized) assignmentOwner(co, next);
     const clean = checked(co, kind, next, cur.body);
+    const authority = evidenceWriter(co, who, cur.kind, clean, cur, priorAuthority);
+    preserveTaskOutcomes(co, cur, clean);
+    if (cur.kind === "entry") rememberEntryAuthority(co, cur.id, [...priorAuthority, ...authority]);
     const changed = changedFields(cur.body, clean);
     if (!changed.length) return cur;
     const r: Rec = { ...cur, rev: cur.rev + 1, body: clean, updated_at: new Date().toISOString(), updated_by: who.name };
@@ -274,6 +416,9 @@ export function patch(co: Company, who: Who, ref: string, set: Body, m: WriteMet
 export function setArchived(co: Company, who: Who, ref: string, archived: boolean, m: WriteMeta = {}): Rec {
   return co.tx(() => {
     const cur = need(co, ref);
+    if (cur.kind === "assignment") assignmentWriter(who, cur);
+    const priorAuthority = evidenceWriter(co, who, cur.kind, cur.body, cur);
+    if (cur.kind === "entry") rememberEntryAuthority(co, cur.id, priorAuthority);
     if (cur.archived === archived) return cur;
     const r: Rec = { ...cur, rev: cur.rev + 1, archived, updated_at: new Date().toISOString(), updated_by: who.name };
     return store(co, r, getKind(co, cur.kind)!, archived ? "archive" : "restore", ["archived"], who, m, false);

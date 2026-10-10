@@ -1,19 +1,10 @@
 // Operations on records of any kind.
 import { Type } from "typebox";
-import { listAgents } from "../core/agents.ts";
-import type { Company } from "../core/company.ts";
-import { invalid, notFound } from "../core/errors.ts";
+import { forbidden, notFound } from "../core/errors.ts";
 import { defineKind, listKinds } from "../core/kinds.ts";
 import * as records from "../core/records.ts";
 import { canonicalKind } from "../core/schema.ts";
 import { Body, Limit, meta, op, Ref, Result, who, Why, type Operation } from "./define.ts";
-
-/** An assignment must name the agent who is to do it, and that agent must exist and be on. */
-export function checkOwner(co: Company, body: records.Body): void {
-  const owner = body.owner;
-  if (typeof owner !== "string" || !owner) throw invalid("an assignment needs an owner (an agent's name)");
-  if (owner !== "curator" && !listAgents(co).some((a) => a.name === owner && a.active)) throw invalid(`no active agent ${owner} in this company`);
-}
 
 export const recordOperations: Operation[] = [
   op({
@@ -21,8 +12,8 @@ export const recordOperations: Operation[] = [
     input: Type.Object({ kind: Type.String(), body: Body, why: Why, result: Result }),
     run: (ctx, i) => {
       const kind = canonicalKind(i.kind); // `work_order` (the old name) makes an assignment
-      const body = kind === "assignment" ? { status: "queued", ...i.body } : kind === "entry" ? { type: "note", ...i.body } : i.body;
-      if (kind === "assignment") checkOwner(ctx.company, body);
+      if (kind === "assignment" && i.result) throw forbidden("use assignment.report to report an assignment result");
+      const body = kind === "entry" ? { type: "note", ...i.body } : i.body;
       const r = records.create(ctx.company, who(ctx), kind, body, meta(ctx, i.why));
       if (i.result && kind !== "entry") records.logEntry(ctx.company, who(ctx), "outcome", i.result, r, meta(ctx));
       return r;
@@ -32,8 +23,8 @@ export const recordOperations: Operation[] = [
     name: "record.patch", summary: "Set fields on a record (null removes a field)", role: "member", write: true,
     input: Type.Object({ ref: Ref, set: Body, base_rev: Type.Optional(Type.Integer({ minimum: 1 })), why: Why, result: Result }),
     run: (ctx, i) => {
+      if (i.result && records.need(ctx.company, i.ref).kind === "assignment") throw forbidden("use assignment.report to report an assignment result");
       const r = records.patch(ctx.company, who(ctx), i.ref, i.set, { ...meta(ctx, i.why), baseRev: i.base_rev });
-      if (r.kind === "assignment" && "owner" in i.set) checkOwner(ctx.company, r.body);
       if (i.result) records.logEntry(ctx.company, who(ctx), "outcome", i.result, r, meta(ctx));
       return r;
     },

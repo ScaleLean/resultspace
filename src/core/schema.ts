@@ -2,11 +2,18 @@
 import type { Db } from "./db.ts";
 import { invalid } from "./errors.ts";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 // Refuses a statement outright: used for "never delete" and "history is append-only".
 const forbid = (name: string, when: string, table: string, message: string) =>
   `create trigger ${name} before ${when} on ${table} begin select raise(abort, '${message}'); end;`;
+
+const EVIDENCE_AUTHORITY_DDL = `
+create table evidence_authority (
+  record_id text primary key references records (id),
+  assignment_ids text not null check (json_valid(assignment_ids))
+) strict;
+`;
 
 export const DDL = `
 create table meta (k text primary key, v text not null) strict;
@@ -49,6 +56,8 @@ create table revisions (
   why text,
   unique (record_id, rev)
 ) strict;
+
+${EVIDENCE_AUTHORITY_DDL}
 
 create table ops (
   op_id text primary key,
@@ -170,6 +179,7 @@ export const UPGRADES: Record<number, string | ((db: Db) => void)> = {
   `,
   // 2 -> 3: work orders become assignments (see assignmentUpgrade).
   3: assignmentUpgrade,
+  4: EVIDENCE_AUTHORITY_DDL,
 };
 
 /**

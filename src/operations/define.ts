@@ -30,7 +30,7 @@ export const Why = Type.Optional(Type.String({ maxLength: 500, description: "Why
 export const Result = Type.Optional(Type.String({ minLength: 1, maxLength: 300, description: "The outcome, result first: what changed or is now true. Recorded as a result." }));
 export const Limit = (max: number) => Type.Optional(Type.Integer({ minimum: 1, maximum: max }));
 
-export const who = (ctx: Ctx): Who => ({ name: ctx.actor.name, kind: ctx.actor.kind });
+export const who = (ctx: Ctx): Who => ({ name: ctx.actor.name, kind: ctx.actor.kind, role: ctx.actor.role });
 export const meta = (ctx: Ctx, why?: string | undefined): WriteMeta => ({ why, opId: ctx.opId });
 
 /** "24h", "7d", "30m" or an ISO time -> an ISO time. */
