@@ -87,7 +87,7 @@ function move(ctx: Ctx, ref: string, status: string, o: { set?: records.Body; ou
   const now = String(cur.body.status ?? "queued");
   if (ASSIGNMENT_FINAL.includes(now)) throw invalid(`${cur.key} is already ${now}`);
   if (o.from && !o.from.includes(now)) throw invalid(`${cur.key} is ${STATUS_WORDS[now] ?? now}: it cannot go to ${STATUS_WORDS[status] ?? status} from there`);
-  const r = records.patch(ctx.company, who(ctx), cur.id, { status, ...o.set }, meta(ctx));
+  const r = records.patchAssignment(ctx.company, who(ctx), cur.id, { status, ...o.set }, meta(ctx));
   if (o.outcome) records.logEntry(ctx.company, who(ctx), "outcome", o.outcome, r, meta(ctx));
   return assignmentOf(ctx.company, r);
 }
@@ -130,7 +130,7 @@ export const assignmentOperations: Operation[] = [
     run: (ctx) => {
       const next = openAssignments(ctx.company, ctx.actor.name).filter((r) => (r.body.status ?? "queued") === "queued").sort((a, b) => (a.updated_at < b.updated_at ? -1 : 1))[0];
       if (!next) return { assignment: null };
-      return { assignment: assignmentOf(ctx.company, records.patch(ctx.company, who(ctx), next.id, { status: "picked_up" }, meta(ctx))), claimed: true };
+      return { assignment: assignmentOf(ctx.company, records.patchAssignment(ctx.company, who(ctx), next.id, { status: "picked_up" }, meta(ctx))), claimed: true };
     },
   }),
   op({
@@ -164,7 +164,7 @@ export const assignmentOperations: Operation[] = [
     run: (ctx, i) => {
       const cur = assignment(ctx, i.ref);
       if (cur.body.status !== "needs_permission") throw invalid(`${cur.key} is not waiting for an answer`);
-      return assignmentOf(ctx.company, records.patch(ctx.company, who(ctx), cur.id, { status: "in_progress", answer: i.answer, answered_by: ctx.actor.name }, meta(ctx)));
+      return assignmentOf(ctx.company, records.patchAssignment(ctx.company, who(ctx), cur.id, { status: "in_progress", answer: i.answer, answered_by: ctx.actor.name }, meta(ctx)));
     },
   }),
   op({
@@ -183,7 +183,7 @@ export const assignmentOperations: Operation[] = [
       const cur = assignment(ctx, i.ref);
       if (cur.body.status !== "done") throw invalid(`${cur.key} has no reported result to verify (it is ${STATUS_WORDS[String(cur.body.status)] ?? String(cur.body.status)})`);
       if (cur.body.reported_by === ctx.actor.name) throw forbidden("the one who reported a result cannot also verify it");
-      return assignmentOf(ctx.company, records.patch(ctx.company, who(ctx), cur.id,
+      return assignmentOf(ctx.company, records.patchAssignment(ctx.company, who(ctx), cur.id,
         { verification: i.verdict, verified_by: ctx.actor.name, verified_at: new Date().toISOString(), verification_note: i.note ?? null }, meta(ctx)));
     },
   }),

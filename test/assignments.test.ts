@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { Actor } from "../src/core/agents.ts";
 import { addAgent } from "../src/core/agents.ts";
 import { RsError } from "../src/core/errors.ts";
-import type { Rec } from "../src/core/records.ts";
+import { create, patch, setArchived, type Rec } from "../src/core/records.ts";
 import { operations, run } from "../src/operations/index.ts";
 import { isMachine, type JournalItem, type Pulse } from "../src/operations/views.ts";
 import type { Assignment, Order } from "../src/operations/assignments.ts";
@@ -203,4 +203,252 @@ test("a person answers an assignment that waits, or cancels one", (t) => {
   assert.throws(() => run(acme, member, "assignment.cancel", { ref: "ASG-0001" }), code("forbidden"), "only an admin cancels");
   assert.equal((run(acme, admin, "assignment.cancel", { ref: "ASG-0001", why: "No longer needed" }) as Assignment).status, "cancelled");
   assert.throws(() => run(acme, admin, "assignment.cancel", { ref: "ASG-0001" }), /already cancelled/);
+});
+
+test("generic assignment writes protect lifecycle, ownership, provenance and undo", (t) => {
+  const { acme } = setup(t);
+  addAgent(acme, member.name);
+  addAgent(acme, stranger.name);
+  const human: Actor = { kind: "person", name: "dana", role: "member" };
+  const boss: Actor = { kind: "agent", name: "boss", role: "admin" };
+  const protectedFields = {
+    status: "done", result: "Finished", reported_by: "alex", reported_at: "2026-01-01",
+    verification: "verified", verified_by: "alex", verified_at: "2026-01-01", verification_note: "Checked",
+    answer: "Yes", answered_by: "alex", _source: { actor: "alex" }, provenance: "imported", progress: "Permission granted",
+  };
+  for (const kind of ["assignment", "work_order"]) {
+    assert.throws(() => run(acme, member, "record.create", { kind, body: { title: "X", owner: member.name } }), code("forbidden"));
+    for (const [field, value] of Object.entries(protectedFields)) {
+      assert.throws(() => run(acme, human, "record.create", { kind, body: { title: "X", owner: member.name, [field]: value } }), code("forbidden"), field);
+    }
+    for (const status of [null, "picked_up", "in_progress", "needs_permission", "failed", "cancelled"]) {
+      assert.throws(() => run(acme, admin, "record.create", { kind, body: { title: "X", owner: member.name, status } }), code("forbidden"));
+    }
+  }
+  assert.deepEqual(run(acme, human, "record.list", { kind: "assignment" }), []);
+  const a = rec(acme, human, "record.create", { kind: "work_order", body: { title: "Count", owner: member.name, status: "queued" } });
+  assert.equal(a.key, "ASG-0001", "rejected creates consume no keys");
+  for (const actor of [member, stranger, admin, boss]) {
+    for (const [field, value] of Object.entries(protectedFields)) {
+      for (const v of [value, null]) assert.throws(() => run(acme, actor, "record.patch", { ref: a.id, set: { [field]: v } }), code("forbidden"), field);
+    }
+    assert.throws(() => run(acme, actor, "record.patch", { ref: a.key, set: {}, result: "Finished" }), code("forbidden"));
+  }
+  assert.throws(() => run(acme, admin, "record.create", { kind: "assignment", body: { title: "X", owner: member.name }, result: "Finished" }), code("forbidden"));
+  assert.throws(() => run(acme, stranger, "record.patch", { ref: a.key, set: { title: "Changed", owner: stranger.name } }), code("forbidden"));
+  assert.throws(() => run(acme, member, "record.patch", { ref: a.key, set: { owner: stranger.name } }), code("forbidden"));
+  assert.equal(rec(acme, member, "record.get", { ref: a.key }).rev, 1);
+  rec(acme, member, "record.patch", { ref: a.key, set: { title: "Count widgets", brief: "Check twice", due_on: "2026-11-01" } });
+  assert.throws(() => run(acme, stranger, "record.undo", { ref: a.key }), code("forbidden"));
+  assert.equal(rec(acme, member, "record.undo", { ref: a.key }).body.title, "Count");
+  const before = rec(acme, admin, "record.get", { ref: a.key });
+  assert.throws(() => run(acme, admin, "record.patch", { ref: a.key, set: { owner: "missing", title: "Lost" } }), /no active agent/);
+  assert.deepEqual(rec(acme, admin, "record.get", { ref: a.key }), before);
+  rec(acme, admin, "record.patch", { ref: a.key, set: { owner: stranger.name } });
+  assert.throws(() => run(acme, member, "assignment.report", { ref: a.key, result: "Finished" }), code("forbidden"));
+  run(acme, stranger, "work.start", { ref: a.key });
+  run(acme, stranger, "work.report", { ref: a.key, result: "Counted 12" });
+  for (const actor of [stranger, admin, boss]) assert.throws(() => run(acme, actor, "record.undo", { ref: a.key }), code("forbidden"));
+  assert.throws(() => run(acme, boss, "assignment.verify", { ref: a.key, verdict: "verified" }), /only a person/);
+  run(acme, admin, "assignment.verify", { ref: a.key, verdict: "verified" });
+  assert.throws(() => run(acme, admin, "record.undo", { ref: a.key }), code("forbidden"));
+  assert.equal((run(acme, admin, "assignment.show", { ref: a.key }) as Assignment).verification.state, "verified");
+});
+
+test("assignment archive and restore check owner/admin, including undo and no-op calls", (t) => {
+  const { acme } = setup(t);
+  addAgent(acme, member.name);
+  const a = rec(acme, admin, "record.create", { kind: "assignment", body: { title: "Count", owner: member.name } });
+  for (const name of ["record.archive", "record.restore"]) assert.throws(() => run(acme, stranger, name, { ref: a.key }), code("forbidden"));
+  rec(acme, member, "record.archive", { ref: a.key });
+  assert.throws(() => run(acme, stranger, "record.undo", { ref: a.key }), code("forbidden"));
+  assert.throws(() => run(acme, member, "assignment.report", { ref: a.key, result: "Finished" }), /archived/);
+  assert.throws(() => run(acme, member, "record.patch", { ref: a.key, set: { title: "Hidden" } }), /archived/);
+  assert.equal(rec(acme, member, "record.undo", { ref: a.key }).archived, false);
+  rec(acme, admin, "record.archive", { ref: a.key });
+  assert.throws(() => run(acme, stranger, "record.restore", { ref: a.key }), code("forbidden"));
+  assert.equal(rec(acme, admin, "record.restore", { ref: a.key }).archived, false);
+  assert.equal((run(acme, member, "assignment.report", { ref: a.key, result: "Counted" }) as Assignment).status, "done");
+});
+
+
+test("core assignment writers and approved requests share the same guard", (t) => {
+  const { acme } = setup(t);
+  addAgent(acme, member.name);
+  assert.throws(() => create(acme, admin, "work_order", { title: "X", owner: member.name, reported_by: "alex" }), code("forbidden"));
+  const a = create(acme, admin, "assignment", { title: "Count", owner: member.name });
+  assert.equal(a.body.status, "queued");
+  assert.throws(() => patch(acme, admin, a.key, { status: "done" }), code("forbidden"));
+  assert.throws(() => patch(acme, stranger, a.key, { brief: "Changed" }), code("forbidden"));
+  assert.throws(() => setArchived(acme, stranger, a.key, true), code("forbidden"));
+  assert.throws(() => run(acme, member, "record.patch", { ref: a.key, set: { status: "done" } }, "denied-assignment-001"), code("forbidden"));
+  assert.equal(acme.all("select * from ops").length, 0);
+  const req = rec(acme, member, "request.propose", {
+    title: "Change assignment", operation: "record.patch", input: { ref: a.key, set: { verification: "verified", verified_by: "alex" } }, why: "Check",
+  });
+  assert.throws(() => run(acme, admin, "request.decide", { ref: req.key, approve: true }), code("forbidden"));
+  assert.equal(rec(acme, admin, "record.get", { ref: req.key }).body.status, "open");
+  assert.deepEqual(rec(acme, admin, "record.get", { ref: a.key }), a);
+});
+
+test("assignment outcome authority covers core writes, old links, type changes and shortcuts", (t) => {
+  const { acme } = setup(t);
+  addAgent(acme, member.name);
+  addAgent(acme, stranger.name);
+  const a = rec(acme, admin, "record.create", { kind: "assignment", body: { title: "Count", owner: member.name } });
+  const own = rec(acme, admin, "record.create", { kind: "assignment", body: { title: "Other", owner: stranger.name } });
+  const task = create(acme, member, "task", { title: "Step", assignment_id: a.id });
+  for (const link of [{ assignment_id: a.key }, { work_order_id: a.id }, { about_id: a.key }, { about_id: task.key }]) {
+    assert.throws(() => create(acme, stranger, "entry", { type: "outcome", title: "Counted", ...link }), code("forbidden"));
+  }
+  const note = create(acme, admin, "entry", { type: "note", title: "Note", assignment_id: a.id });
+  assert.throws(() => patch(acme, stranger, note.key, { type: "outcome" }), code("forbidden"));
+  const unrelated = create(acme, stranger, "entry", { type: "outcome", title: "Other result" });
+  assert.throws(() => patch(acme, stranger, unrelated.key, { work_order_id: a.key }), code("forbidden"));
+  const outcome = create(acme, member, "entry", { type: "outcome", title: "Counted", assignment_id: a.id });
+  for (const set of [{ title: "Changed" }, { assignment_id: own.id }, { assignment_id: null }, { type: "note" }]) {
+    assert.throws(() => patch(acme, stranger, outcome.key, set), code("forbidden"));
+  }
+  assert.throws(() => patch(acme, member, outcome.key, { assignment_id: own.id }), code("forbidden"), "both old and new assignments are checked");
+  for (const archived of [false, true]) assert.throws(() => setArchived(acme, stranger, outcome.key, archived), code("forbidden"));
+  const before = rec(acme, admin, "record.get", { ref: task.key });
+  for (const [name, input] of [
+    ["journal.log", { title: "Counted", about: a.key }],
+    ["journal.log", { title: "Counted", about: task.key }],
+    ["record.patch", { ref: task.key, set: { title: "Changed" }, result: "Counted" }],
+    ["record.create", { kind: "task", body: { title: "New step", assignment_id: a.key }, result: "Counted" }],
+    ["record.patch", { ref: note.key, set: {}, result: "Counted" }],
+  ] as const) assert.throws(() => run(acme, stranger, name, input), code("forbidden"), name);
+  assert.deepEqual(rec(acme, admin, "record.get", { ref: task.key }), before, "denied shortcuts roll back the primary mutation");
+  assert.equal((run(acme, admin, "record.list", { kind: "task" }) as Rec[]).length, 1);
+  patch(acme, member, outcome.key, { title: "Counted twice" });
+  assert.throws(() => run(acme, stranger, "record.undo", { ref: outcome.key }), code("forbidden"));
+  run(acme, admin, "record.undo", { ref: outcome.key });
+  setArchived(acme, admin, outcome.key, true);
+  assert.throws(() => setArchived(acme, stranger, outcome.key, false), code("forbidden"));
+  setArchived(acme, member, outcome.key, false);
+  run(acme, admin, "journal.log", { title: "Checked the count", about: a.key });
+  run(acme, member, "assignment.report", { ref: a.key, result: "Counted 12" });
+  const shown = run(acme, member, "assignment.show", { ref: a.key }) as Assignment & { outcomes: { title: string }[] };
+  assert.equal(shown.result, "Counted 12");
+  assert.equal(shown.reported_by, member.name);
+  assert.deepEqual(shown.outcomes.map((x) => x.title).sort(), ["Checked the count", "Counted", "Counted 12"].sort());
+});
+
+test("assignment task associations require both owners through relink, aliases and undo", (t) => {
+  const { acme } = setup(t);
+  addAgent(acme, member.name);
+  addAgent(acme, stranger.name);
+  const a = create(acme, admin, "assignment", { title: "One", owner: member.name });
+  const b = create(acme, admin, "assignment", { title: "Two", owner: stranger.name });
+  const task = create(acme, admin, "task", { title: "Step", assignment_id: a.id });
+  const outcome = rec(acme, member, "journal.log", { title: "Checked", about: task.key });
+  for (const actor of [member, stranger]) {
+    for (const field of ["assignment_id", "work_order_id"]) {
+      assert.throws(() => patch(acme, actor, task.key, { [field]: b.key }), code("forbidden"));
+    }
+  }
+  assert.throws(() => patch(acme, stranger, task.key, { assignment_id: null }), code("forbidden"));
+  assert.throws(() => patch(acme, stranger, outcome.key, { title: "Changed" }), code("forbidden"));
+  patch(acme, admin, task.key, { work_order_id: b.key });
+  for (const actor of [member, stranger]) {
+    assert.throws(() => run(acme, actor, "record.undo", { ref: task.key }), code("forbidden"));
+    assert.throws(() => patch(acme, actor, task.key, { assignment_id: a.key }), code("forbidden"));
+    assert.throws(() => patch(acme, actor, outcome.key, { title: "Changed" }), code("forbidden"));
+  }
+  run(acme, admin, "record.undo", { ref: task.key });
+  assert.equal(rec(acme, admin, "record.get", { ref: task.key }).body.assignment_id, a.id);
+  assert.equal(rec(acme, admin, "record.get", { ref: outcome.key }).rev, 1);
+});
+
+test("outcome authority survives task detachment, type changes and historical association edits", (t) => {
+  const { acme } = setup(t);
+  addAgent(acme, member.name);
+  addAgent(acme, stranger.name);
+  const a = create(acme, admin, "assignment", { title: "One", owner: member.name });
+  const b = create(acme, admin, "assignment", { title: "Two", owner: stranger.name });
+  const task = create(acme, admin, "task", { title: "Step", assignment_id: a.id });
+  const outcome = rec(acme, member, "journal.log", { title: "Checked", about: task.key });
+  patch(acme, admin, task.key, { assignment_id: null });
+  for (const set of [{ title: "Changed" }, { assignment_id: b.id }, { about_id: null }])
+    assert.throws(() => patch(acme, stranger, outcome.key, set), code("forbidden"));
+  patch(acme, stranger, task.key, { work_order_id: b.key });
+  patch(acme, admin, outcome.key, { type: "note", about_id: null });
+  assert.throws(() => patch(acme, stranger, outcome.key, { title: "Changed" }), code("forbidden"));
+  assert.throws(() => run(acme, stranger, "record.undo", { ref: outcome.key }), code("forbidden"));
+  run(acme, admin, "record.undo", { ref: outcome.key });
+  patch(acme, admin, task.key, { assignment_id: b.id });
+  for (const actor of [member, stranger]) {
+    for (const archived of [false, true]) {
+      if (actor === member) assert.throws(() => setArchived(acme, actor, task.key, archived), code("forbidden"));
+      assert.throws(() => setArchived(acme, actor, outcome.key, archived), code("forbidden"));
+    }
+  }
+  setArchived(acme, admin, task.key, true);
+  run(acme, stranger, "record.undo", { ref: task.key });
+  patch(acme, admin, outcome.key, { title: "Admin checked" });
+  assert.equal(rec(acme, admin, "record.get", { ref: outcome.key }).body.title, "Admin checked");
+});
+
+test("all assignment evidence and task content share core write authority", (t) => {
+  const { acme } = setup(t);
+  addAgent(acme, member.name);
+  addAgent(acme, stranger.name);
+  const a = create(acme, admin, "assignment", { title: "Count", owner: member.name });
+  for (const type of ["outcome", "session", "action", "note"]) {
+    for (const field of ["assignment_id", "work_order_id"]) {
+      assert.throws(() => create(acme, stranger, "entry", { type, title: "Evidence", [field]: a.key }), code("forbidden"));
+    }
+  }
+  assert.throws(() => create(acme, stranger, "task", { title: "Step", assignment_id: a.id }), code("forbidden"));
+  const task = create(acme, member, "task", { title: "Step", status: "todo", assignment_id: a.id });
+  for (const set of [{ title: "Changed" }, { status: "done" }, { assignment_id: null }])
+    assert.throws(() => patch(acme, stranger, task.key, set), code("forbidden"));
+  for (const type of ["session", "action"]) {
+    create(acme, stranger, "entry", { type, title: "Unlinked evidence", about_id: task.id });
+    const evidence = create(acme, member, "entry", { type, title: "Evidence", about_id: task.id, assignment_id: a.id });
+    patch(acme, member, evidence.id, { title: "Owner updated" });
+    for (const name of ["record.patch", "record.archive", "record.restore", "record.undo"]) {
+      assert.throws(() => run(acme, stranger, name, { ref: evidence.key, ...(name === "record.patch" ? { set: { title: "Changed" } } : {}) }), code("forbidden"));
+    }
+    setArchived(acme, admin, evidence.id, true);
+    assert.throws(() => setArchived(acme, stranger, evidence.id, false), code("forbidden"));
+    setArchived(acme, member, evidence.id, false);
+  }
+  patch(acme, member, task.id, { title: "Owner step", status: "done" });
+  assert.throws(() => run(acme, stranger, "record.undo", { ref: task.key }), code("forbidden"));
+  run(acme, admin, "record.undo", { ref: task.key });
+  patch(acme, admin, task.id, { assignment_id: null });
+  patch(acme, stranger, task.id, { title: "Detached" });
+  create(acme, stranger, "entry", { title: "Indirect", type: "session", about_id: task.id });
+  for (const archived of [true, false]) setArchived(acme, stranger, task.id, archived);
+  const ordinary = create(acme, stranger, "task", { title: "Ordinary", status: "todo" });
+  patch(acme, member, ordinary.id, { title: "Shared", status: "done" });
+  setArchived(acme, stranger, ordinary.id, true);
+  run(acme, member, "record.undo", { ref: ordinary.key });
+});
+
+test("shared tasks stay writable after member evidence attachments and many benign notes", (t) => {
+  const { acme } = setup(t);
+  addAgent(acme, member.name);
+  const a = create(acme, admin, "assignment", { title: "Count", owner: member.name });
+  const task = create(acme, stranger, "task", { title: "Shared", status: "todo" });
+  for (const type of ["session", "action", "outcome"]) {
+    const evidence = create(acme, member, "entry", { title: "Evidence", type, assignment_id: a.id, about_id: task.id });
+    patch(acme, stranger, task.id, { title: `Shared ${type}`, status: "done" });
+    patch(acme, member, evidence.id, { assignment_id: null, about_id: null });
+    patch(acme, stranger, task.id, { title: `Detached ${type}` });
+    setArchived(acme, stranger, task.id, true);
+    run(acme, stranger, "record.undo", { ref: task.key });
+    assert.throws(() => patch(acme, stranger, evidence.id, { title: "Changed" }), code("forbidden"));
+  }
+  let tail = task;
+  for (let n = 0; n < 160; n++) tail = create(acme, member, "entry", { title: `Note ${n}`, type: "note", about_id: tail.id });
+  for (const ref of [task.id, tail.id]) {
+    patch(acme, stranger, ref, { title: "Still shared" });
+    setArchived(acme, stranger, ref, true);
+    setArchived(acme, stranger, ref, false);
+    run(acme, member, "record.undo", { ref });
+  }
+  assert.throws(() => create(acme, stranger, "entry", { title: "Invalid", type: "session", assignment_id: 42 }), code("forbidden"));
 });

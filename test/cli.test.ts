@@ -136,3 +136,112 @@ test("rs: old `rs work` JSON stays as it was; `rs assignment` is the new contrac
   assert.deepEqual(["results", "receipts", "actions"].map((k) => (old.data.work_order[k] as unknown[]).length), [1, 0, 1], "work show keeps results and receipts");
   assert.deepEqual(((await rs("ls", "work_order", "--all", "--json")).json() as unknown as { data: { records: Json[] } }).data.records.map((r) => r.kind), ["assignment"]);
 });
+
+
+test("rs: generic assignment writes cannot replace dedicated lifecycle operations", async (t) => {
+  const { s, rs } = await world(t);
+  const { run } = await import("../src/operations/index.ts");
+  const co = s.companies.get("acme");
+  run(co, { kind: "person", name: "alex", role: "admin" }, "record.create", { kind: "assignment", body: { title: "Count", owner: "hermes:acme" } });
+  for (const args of [
+    ["new", "work_order", "--body", JSON.stringify({ title: "X", owner: "hermes:acme", status: "done" })],
+    ["set", "ASG-0001", "status=done"],
+    ["set", "ASG-0001", "verification=verified"],
+  ]) {
+    const denied = await rs("--online", "--json", ...args);
+    assert.notEqual(denied.code, 0);
+    assert.equal(denied.json().error?.kind, "forbidden");
+  }
+  assert.equal((await rs("--online", "--json", "assignment", "report", "ASG-0001", "--result", "Counted 12")).code, 0);
+  const denied = await rs("--online", "--json", "set", "ASG-0001", "reported_by=alex");
+  assert.notEqual(denied.code, 0);
+  assert.equal(denied.json().error?.kind, "forbidden");
+});
+
+test("rs: unrelated members cannot write assignment outcomes or use result shortcuts", async (t) => {
+  const { s, rs } = await world(t);
+  const { run } = await import("../src/operations/index.ts");
+  const co = s.companies.get("acme");
+  const human = { kind: "person", name: "alex", role: "admin" } as const;
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Count", owner: "boss" } });
+  run(co, human, "record.create", { kind: "task", body: { title: "Step", assignment_id: "ASG-0001" } });
+  run(co, human, "record.create", { kind: "entry", body: { type: "outcome", title: "Checked", assignment_id: "ASG-0001" } });
+  for (const args of [
+    ["new", "result", "title=Counted", "work_order_id=ASG-0001"],
+    ["new", "entry", "--body", JSON.stringify({ title: "Counted", type: "outcome", assignment_id: "ASG-0001" })],
+    ["set", "JNL-0001", "title=Changed"],
+    ["archive", "JNL-0001"],
+    ["restore", "JNL-0001"],
+    ["set", "TSK-0001", "title=Changed", "--result", "Counted"],
+    ["new", "task", "title=Other", "assignment_id=ASG-0001", "--result", "Counted"],
+  ]) {
+    const denied = await rs("--online", "--json", ...args);
+    assert.notEqual(denied.code, 0);
+    assert.equal(denied.json().error?.kind, "forbidden");
+  }
+  const task = run(co, human, "record.get", { ref: "TSK-0001" }) as { rev: number };
+  assert.equal(task.rev, 1);
+  assert.equal((run(co, human, "record.list", { kind: "task" }) as unknown[]).length, 1);
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Own count", owner: "hermes:acme" } });
+  assert.equal((await rs("--online", "--json", "assignment", "report", "ASG-0002", "--result", "Counted 12")).code, 0);
+});
+
+test("rs: task aliases and outcome edits retain assignment authority after authorized relinking", async (t) => {
+  const { s, rs } = await world(t);
+  const { run } = await import("../src/operations/index.ts");
+  const co = s.companies.get("acme");
+  const human = { kind: "person", name: "alex", role: "admin" } as const;
+  run(co, human, "record.create", { kind: "assignment", body: { title: "One", owner: "boss" } });
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Two", owner: "hermes:acme" } });
+  run(co, human, "record.create", { kind: "task", body: { title: "Step", assignment_id: "ASG-0001" } });
+  run(co, human, "journal.log", { title: "Checked", about: "TSK-0001" });
+  for (const fields of [["assignment_id=ASG-0002"], ["work_order_id=ASG-0002"]]) {
+    const denied = await rs("--online", "--json", "set", "TSK-0001", ...fields);
+    assert.equal(denied.json().error?.kind, "forbidden");
+  }
+  run(co, human, "record.patch", { ref: "TSK-0001", set: { assignment_id: "ASG-0002" } });
+  for (const args of [
+    ["set", "TSK-0001", "work_order_id=ASG-0001"],
+    ["set", "JNL-0001", "title=Changed"],
+    ["set", "JNL-0001", "assignment_id=ASG-0002"],
+  ]) assert.equal((await rs("--online", "--json", ...args)).json().error?.kind, "forbidden");
+});
+
+test("rs: session/action evidence and assignment task content require assignment authority", async (t) => {
+  const { s, rs } = await world(t);
+  const { run } = await import("../src/operations/index.ts");
+  const co = s.companies.get("acme");
+  const human = { kind: "person", name: "alex", role: "admin" } as const;
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Count", owner: "boss" } });
+  run(co, human, "record.create", { kind: "task", body: { title: "Step", status: "todo", assignment_id: "ASG-0001" } });
+  run(co, human, "record.create", { kind: "entry", body: { title: "Session", type: "session", assignment_id: "ASG-0001" } });
+  for (const args of [
+    ["new", "receipt", "title=Session", "work_order_id=ASG-0001"],
+    ["new", "action", "title=Action", "assignment_id=ASG-0001"],
+    ["set", "TSK-0001", "title=Changed"], ["set", "TSK-0001", "status=done"],
+    ["set", "JNL-0001", "title=Changed"], ["archive", "JNL-0001"], ["restore", "JNL-0001"],
+  ]) {
+    const denied = await rs("--online", "--json", ...args);
+    assert.notEqual(denied.code, 0);
+    assert.equal(denied.json().error?.kind, "forbidden");
+  }
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Own", owner: "hermes:acme" } });
+  assert.equal((await rs("--online", "--json", "act", "ads", "--detail", "Owner action", "--assignment", "ASG-0002")).code, 0);
+  assert.equal((await rs("--online", "--json", "new", "receipt", "title=Owner session", "assignment_id=ASG-0002")).code, 0);
+});
+
+test("rs: assignment evidence and benign notes cannot take shared-task write authority", async (t) => {
+  const { s, rs } = await world(t);
+  const { run } = await import("../src/operations/index.ts");
+  const co = s.companies.get("acme");
+  const human = { kind: "person", name: "alex", role: "admin" } as const;
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Own", owner: "boss" } });
+  run(co, human, "record.create", { kind: "task", body: { title: "Shared", status: "todo" } });
+  run(co, { kind: "agent", name: "boss", role: "admin" }, "record.create", { kind: "entry", body: { title: "Evidence", type: "outcome", assignment_id: "ASG-0001", about_id: "TSK-0001" } });
+  assert.equal((await rs("--online", "--json", "set", "TSK-0001", "title=Shared update", "status=done")).code, 0);
+  run(co, human, "record.patch", { ref: "JNL-0001", set: { assignment_id: null, about_id: null } });
+  for (let n = 0; n < 130; n++) run(co, { kind: "agent", name: "hermes:acme", role: "member" }, "record.create", { kind: "entry", body: { title: `Note ${n}`, type: "note", about_id: "TSK-0001" } });
+  for (const args of [["set", "TSK-0001", "title=Still shared"], ["archive", "TSK-0001"], ["restore", "TSK-0001"]])
+    assert.equal((await rs("--online", "--json", ...args)).code, 0);
+  assert.equal((await rs("--online", "--json", "set", "JNL-0001", "title=Changed", "assignment_ids:=[]")).json().error?.kind, "forbidden");
+});
