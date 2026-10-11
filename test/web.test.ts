@@ -400,3 +400,22 @@ test("web: authenticated author/read path for projects, facts, learning, issues,
   assert.equal((await s.post("/account?/signout", {})).status, 303);
   assert.equal((await s.get(path)).headers.get("location"), "/login");
 });
+
+test("web: historical Journal about relations render titles or keys without altering stored data", { skip: SKIP }, async (t) => {
+  const s = await serve(t);
+  await s.people.add("alex", EMAIL, { password: PASSWORD });
+  const co = s.companies.create("acme", "Acme");
+  const { legacyJournal } = await import("./fixtures/legacy-journal.ts");
+  legacyJournal(co);
+  const before = ["records", "revisions", "links"].map(table => co.all(`select * from ${table} order by 1`));
+  await s.signIn();
+  const response = await s.get("/c/acme/journal");
+  const html = await response.text();
+  assert.equal(response.status, 200, html);
+  assert.match(html, /Imported supplier observation/);
+  assert.match(html, /Historical supplier evidence/);
+  assert.match(html, /href="\/c\/acme\/r\/KNW-0901"/);
+  assert.match(html.replace(/<!--[\s\S]*?-->/g, ""), /href="\/c\/acme\/r\/KNW-0902"[^>]*>\s*KNW-0902\s*<\/a>/);
+  assert.match(html, /Imported untitled relation/);
+  assert.deepEqual(["records", "revisions", "links"].map(table => co.all(`select * from ${table} order by 1`)), before);
+});

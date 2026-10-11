@@ -31,6 +31,7 @@ export function journalItems(
     const first = history[0]!;
     const last = history.at(-1)!;
     const scope = records.projectScope(co, r);
+    const about = typeof r.body.about_id === "string" ? records.get(co, r.body.about_id) : undefined;
     return {
       key: r.key,
       type: String(r.body.type ?? "note"),
@@ -52,7 +53,7 @@ export function journalItems(
       claim_provenance: records.provenance(co, r).provenance,
       project_scope: scope,
       project: scope.project_id ? records.need(co, scope.project_id).key : null,
-      about: typeof r.body.about_id === "string" ? (records.get(co, r.body.about_id) ?? null) : null,
+      about: about ? { ...about, title: records.titleOf(co, about) } : null,
     };
   });
 }

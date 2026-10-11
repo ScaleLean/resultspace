@@ -171,3 +171,32 @@ test("CLI Journal scope rejects conflicting project/about through log, generic c
   assert.equal(((await rs("project", "context", "PRJ-0001", "--json")).json().data.log as Json[]).length, 1);
   assert.deepEqual((await rs("project", "context", "PRJ-0002", "--json")).json().data.log, []);
 });
+
+test("CLI and API Journal preserve legacy about keys and supply display titles", async (t) => {
+  const { dir, s, rs } = await world(t);
+  const co = s.companies.get("acme");
+  const { legacyJournal } = await import("./fixtures/legacy-journal.ts");
+  legacyJournal(co);
+  const before = ["records", "revisions", "links"].map(table => co.all(`select * from ${table} order by 1`));
+  const key = (await import("node:fs")).readFileSync(join(dir, "acme.key"), "utf8").trim();
+  const response = await fetch(`http://127.0.0.1:${s.port}/v1/op/journal.list`, {
+    method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: "{}",
+  });
+  assert.equal(response.status, 200);
+  const api = (await response.json()).result as Json[];
+  const cli = await rs("journal", "--json", "--online");
+  assert.equal(cli.code, 0, cli.err);
+  const items = cli.json().data.items as Json[];
+  assert.deepEqual(items, api);
+  const missing = items.find(e => e.key === "JNL-0901")!;
+  assert.equal(missing.type, "note");
+  assert.equal((missing.about as Json).key, "KNW-0901");
+  assert.equal((missing.about as Json).title, "Historical supplier evidence");
+  const unknown = items.find(e => e.key === "JNL-0902")!;
+  assert.equal(unknown.type, "legacy_observation");
+  assert.equal((unknown.about as Json).key, "KNW-0902");
+  assert.equal((unknown.about as Json).title, "KNW-0902");
+  const text = await rs("journal", "--online");
+  assert.equal(text.code, 0, text.err); assert.match(text.out, /Imported supplier observation/);
+  assert.deepEqual(["records", "revisions", "links"].map(table => co.all(`select * from ${table} order by 1`)), before);
+});
