@@ -8,7 +8,7 @@ export function authorBody(f: FormData, kind: string): Body {
     project: ["goal", "current_state", "status"],
     fact: ["subject", "predicate", "value_type", "scope", "unit", "observed_at", "source", "project_id"],
     knowledge: ["body", "source", "project_id"],
-    issue: ["detail", "status", "project_id"],
+    issue_note: ["detail", "status", "project_id"],
     entry: ["detail", "type", "source", "project_id"],
     source: ["url", "detail"],
     flag: ["detail", "status", "suggestion"],

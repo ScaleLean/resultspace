@@ -4,19 +4,19 @@ import { need, fail_of } from "#lib/server/rs.ts";
 import type { Rec } from "../../../../../src/core/records.ts";
 import type { Actions, PageServerLoad } from "./$types";
 export const load: PageServerLoad = ({ locals, params }) => ({
-  kind: "issue",
+  kind: "issue_note",
   label: "Issue notes",
-  records: need(locals.rs.run<Rec[]>(params.slug, "record.list", { kind: "issue", limit: 200 })),
+  records: need(locals.rs.run<Rec[]>(params.slug, "record.list", { kind: "issue_note", limit: 200 })),
 });
 export const actions: Actions = {
   create: async ({ locals, params, request }) => {
     let body;
     try {
-      body = authorBody(await request.formData(), "issue");
+      body = authorBody(await request.formData(), "issue_note");
     } catch (e) {
       return fail_of({ ok: false, error: e instanceof Error ? e.message : "Invalid input" });
     }
-    const r = locals.rs.run<Rec>(params.slug, "record.create", { kind: "issue", body });
+    const r = locals.rs.run<Rec>(params.slug, "record.create", { kind: "issue_note", body });
     if (!r.ok) return fail_of(r);
     redirect(303, `/c/${params.slug}/r/${r.result.key}`);
   },

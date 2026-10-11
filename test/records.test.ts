@@ -9,15 +9,15 @@ const code = (c: string) => (e: unknown) => e instanceof RsError && e.code === c
 
 test("create gives keys in order and keeps every version", (t) => {
   const { acme } = setup(t);
-  const a = rec(acme, member, "record.create", { kind: "issue", body: { title: "Call supplier", status: "open" } });
-  const b = rec(acme, member, "record.create", { kind: "issue", body: { title: "Send samples" } });
-  assert.equal(a.key, "ISS-0001");
-  assert.equal(b.key, "ISS-0002");
-  const c = rec(acme, member, "record.patch", { ref: "ISS-0001", set: { status: "resolved", note: "ok" }, why: "supplier answered" });
+  const a = rec(acme, member, "record.create", { kind: "issue_note", body: { title: "Call supplier", status: "open" } });
+  const b = rec(acme, member, "record.create", { kind: "issue_note", body: { title: "Send samples" } });
+  assert.equal(a.key, "ISN-0001");
+  assert.equal(b.key, "ISN-0002");
+  const c = rec(acme, member, "record.patch", { ref: "ISN-0001", set: { status: "resolved", note: "ok" }, why: "supplier answered" });
   assert.equal(c.rev, 2);
   const d = rec(acme, member, "record.patch", { ref: a.id, set: { note: null } });
   assert.deepEqual(d.body, { title: "Call supplier", status: "resolved" });
-  const h = run(acme, member, "record.history", { ref: "iss-0001" }) as Revision[];
+  const h = run(acme, member, "record.history", { ref: "isn-0001" }) as Revision[];
   assert.deepEqual(
     h.map((v) => [v.rev, v.op, v.changed]),
     [
@@ -47,17 +47,17 @@ test("base_rev refuses a write on a record that moved on", (t) => {
 
 test("a kind checks its title, its statuses and its references", (t) => {
   const { acme } = setup(t);
-  assert.throws(() => run(acme, member, "record.create", { kind: "issue", body: { status: "open" } }), code("invalid"));
-  assert.throws(() => run(acme, member, "record.create", { kind: "issue", body: { title: "x", status: "someday" } }), code("invalid"));
+  assert.throws(() => run(acme, member, "record.create", { kind: "issue_note", body: { status: "open" } }), code("invalid"));
+  assert.throws(() => run(acme, member, "record.create", { kind: "issue_note", body: { title: "x", status: "someday" } }), code("invalid"));
   assert.throws(() => run(acme, member, "record.create", { kind: "widget", body: { title: "x" } }), code("invalid"));
   const project = rec(acme, member, "record.create", { kind: "project", body: { title: "Grow", status: "active" } });
-  assert.throws(() => run(acme, member, "record.create", { kind: "issue", body: { title: "P", project_id: "PRJ-0099" } }), code("invalid"));
+  assert.throws(() => run(acme, member, "record.create", { kind: "issue_note", body: { title: "P", project_id: "PRJ-0099" } }), code("invalid"));
   const knowledge = rec(acme, member, "record.create", { kind: "knowledge", body: { title: "Learning" } });
   assert.throws(
-    () => run(acme, member, "record.create", { kind: "issue", body: { title: "T", project_id: knowledge.key } }),
+    () => run(acme, member, "record.create", { kind: "issue_note", body: { title: "T", project_id: knowledge.key } }),
     /must point at a project/,
   );
-  const p = rec(acme, member, "record.create", { kind: "issue", body: { title: "P", project_id: project.key } });
+  const p = rec(acme, member, "record.create", { kind: "issue_note", body: { title: "P", project_id: project.key } });
   assert.equal(p.body.project_id, project.id, "a reference given as a key is stored as the record id");
   // An id of something that is not a record here is left alone.
   const n = rec(acme, member, "record.create", { kind: "entry", body: { title: "W", conversation_id: "abc-123" } });
@@ -67,10 +67,10 @@ test("a kind checks its title, its statuses and its references", (t) => {
 test("a reference to an archived record is refused, but old ones do not block edits", (t) => {
   const { acme } = setup(t);
   rec(acme, member, "record.create", { kind: "project", body: { title: "P" } });
-  rec(acme, member, "record.create", { kind: "issue", body: { title: "T", project_id: "PRJ-0001" } });
+  rec(acme, member, "record.create", { kind: "issue_note", body: { title: "T", project_id: "PRJ-0001" } });
   rec(acme, member, "record.archive", { ref: "PRJ-0001" });
-  assert.throws(() => run(acme, member, "record.create", { kind: "issue", body: { title: "T2", project_id: "PRJ-0001" } }), /archived/);
-  assert.equal(rec(acme, member, "record.patch", { ref: "ISS-0001", set: { title: "T renamed" } }).rev, 2);
+  assert.throws(() => run(acme, member, "record.create", { kind: "issue_note", body: { title: "T2", project_id: "PRJ-0001" } }), /archived/);
+  assert.equal(rec(acme, member, "record.patch", { ref: "ISN-0001", set: { title: "T renamed" } }).rev, 2);
 });
 
 test("links: reference fields and cited keys, both directions", (t) => {

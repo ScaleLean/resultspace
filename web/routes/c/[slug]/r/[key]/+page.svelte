@@ -1,5 +1,6 @@
 <script lang="ts">
   import { when } from "#lib/fmt.ts";
+  import Provenance from "#lib/Provenance.svelte";
   import Author from "#lib/Author.svelte";
   import Prose from "#lib/Prose.svelte";
   let { data, form } = $props();
@@ -11,6 +12,8 @@
 <div class="page">
   <p class="meta">{rec.key} · {rec.kind} · revision {rec.rev}</p>
   <h1>{title}</h1>
+  <Provenance value={{ provenance: data.provenance, last_edited: data.last_edited, citation_provenance: data.citation_provenance, original: data.original }} claim={["fact", "knowledge", "entry"].includes(rec.kind)} />
+  {#if data.project_scope.problem}<p class="notice">{data.project_scope.problem}. Original data is retained; this record has no canonical project until its links are explicitly corrected.</p>{/if}
   {#if data.legacy}<p class="notice">Read-only legacy archive. Original keys, content and history are preserved.</p>{/if}
   {#if form?.error}<p class="error" role="alert">{form.error}</p>{/if}{#if form?.saved}<p class="notice">{form.saved}</p>{/if}
   {#each Object.entries(rec.body).filter(([k]) => !["title", "name", "evidence", "signature", "value_type"].includes(k) && !k.endsWith("_id") && !k.endsWith("_ids") && !k.startsWith("_")) as [k, v]}<section
@@ -22,6 +25,9 @@
     </section>{/each}
   {#if data.project}<h2>Focused project context</h2>
     <p>{data.project.scope}</p>
+    {#if data.project.scope_conflicts.length}<p class="notice">Historical Journal scope conflicts are excluded from this project's log.</p>
+      {#each data.project.scope_conflicts as e}<p><a href="/c/{data.slug}/r/{e.record.key}">{e.record.key}: inspect conflicting historical links</a></p>{/each}
+    {/if}
     {#if data.project.truncated}<p class="notice">Some context is omitted. Read the linked records for more.</p>{/if}
     {#each [["facts", data.project.facts], ["knowledge", data.project.knowledge], ["sources", data.project.sources], ["issues", data.project.issues], ["log", data.project.log], ["findings", data.project.findings]] as [label, items]}<h2
       >
@@ -31,7 +37,7 @@
         {#each items as e}<article class="card">
             <a class="btn" href="/c/{data.slug}/r/{e.record.key}">{String(e.record.body.title)}</a>
             <p>{String(e.record.body.detail ?? e.record.body.body ?? e.record.body.value ?? "")} {String(e.record.body.unit ?? "")}</p>
-            <p class="meta">{e.provenance.actor} · {when(e.provenance.at)} · revision {e.provenance.rev}</p>
+            <Provenance value={e} claim={["fact", "knowledge", "entry"].includes(e.record.kind)} />
             {#each e.sources as source}<a class="btn" href="/c/{data.slug}/r/{source.key}">Source: {String(source.body.title)}</a>{/each}
           </article>{/each}
       </div>{/each}{/if}

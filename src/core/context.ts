@@ -4,17 +4,11 @@ import { invalid } from "./errors.ts";
 import * as records from "./records.ts";
 
 export function evidence(co: Company, r: records.Rec) {
-  const last = records.history(co, r.id).at(-1)!;
   const sourceIds = Array.isArray(r.body.source_ids) ? r.body.source_ids : [];
   return {
     record: r,
-    provenance: {
-      actor: last.actor,
-      actor_kind: last.actor_kind,
-      at: last.at,
-      rev: last.rev,
-      why: last.why,
-    },
+    ...records.provenance(co, r),
+    project_scope: records.projectScope(co, r),
     sources: sourceIds.flatMap((id) => {
       const s = typeof id === "string" ? records.get(co, id) : undefined;
       return s ? [s] : [];
@@ -37,7 +31,15 @@ export function projectContext(co: Company, ref: string, limit = 100) {
     project.id,
     project.id,
   );
-  const relevant = ids.map((x) => records.need(co, x.id));
+  const journal = records.journalRecords(co, { limit: null });
+  const relevant = [
+    ...ids.map((x) => records.need(co, x.id)).filter((r) => r.kind !== "entry"),
+    ...journal.filter((r) => records.projectScope(co, r).project_id === project.id),
+  ].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.key.localeCompare(b.key));
+  const scopeConflicts = journal.filter((r) => {
+    const scope = records.projectScope(co, r);
+    return scope.problem && [scope.declared, scope.inherited].includes(project.id);
+  });
   // Inventory includes citations on relevant claims even when the source has no project link.
   const sourceIds = new Set(relevant.filter((r) => r.kind === "source").map((r) => r.id));
   for (const r of [project, ...relevant]) {
@@ -53,7 +55,7 @@ export function projectContext(co: Company, ref: string, limit = 100) {
       .filter((r) => r.kind === kind)
       .slice(-limit)
       .map((r) => evidence(co, r));
-  const relatedIds = new Set([project.id, ...ids.map((x) => x.id)]);
+  const relatedIds = new Set([project.id, ...relevant.map((r) => r.id)]);
   const findings = co
     .all<{ id: string }>(
       `select id from records where kind = 'flag' and archived = 0
@@ -71,21 +73,23 @@ export function projectContext(co: Company, ref: string, limit = 100) {
     );
   return {
     project: evidence(co, project),
+    scope_conflicts: scopeConflicts.slice(-limit).map((r) => evidence(co, r)),
     facts: section("fact"),
     knowledge: section("knowledge"),
     log: section("entry"),
-    issues: section("issue"),
+    issues: section("issue_note"),
     decisions: section("decision"),
     sources: sources.slice(-limit).map((r) => evidence(co, r)),
     findings: findings.slice(-limit).map((r) => evidence(co, r)),
     truncated:
       findings.length > limit ||
+      scopeConflicts.length > limit ||
       sources.length > limit ||
-      ["fact", "knowledge", "entry", "issue", "decision", "source"].some(
+      ["fact", "knowledge", "entry", "issue_note", "decision", "source"].some(
         (k) => relevant.filter((r) => r.kind === k).length > limit,
       ),
     scope:
-      "Explicit project links and citations only; use search for other company knowledge.",
+      "Facts/knowledge may be deliberately shared by project links. Journal uses one canonical project; conflicting historical entries are flagged separately.",
   };
 }
 export type ProjectContext = ReturnType<typeof projectContext>;

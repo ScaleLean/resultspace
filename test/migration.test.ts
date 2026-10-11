@@ -1,4 +1,4 @@
-// Schemas 2/3/4 upgrade directly to 5; original work/assignment records remain read-only with their exact keys.
+// Schemas 2/3/4 upgrade directly to 6; original work/assignment records remain read-only with their exact keys.
 import assert from "node:assert/strict";
 import {
   readFileSync,
@@ -323,7 +323,7 @@ const dump = (dir: string) => {
   }
 };
 for (const version of [2, 3, 4])
-  test(`schema ${version} -> 5 preserves all content and supports backup/restore and rollback`, async (t) => {
+  test(`schema ${version} -> 6 preserves all content and supports backup/restore and rollback`, async (t) => {
     const dir = mkdtempSync(join(tmpdir(), "rs-migrate5-"));
     const source = join(dir, "source");
     mkdirSync(source);
@@ -417,7 +417,7 @@ for (const version of [2, 3, 4])
     const co = companies.get("acme");
     assert.equal(
       co.one<{ v: string }>("select v from meta where k='schema_version'")!.v,
-      "5",
+      "6",
     );
     assert.deepEqual(
       dump(source),
@@ -505,7 +505,7 @@ for (const version of [2, 3, 4])
     rollbackDb.close();
     const { readdirSync } = await import("node:fs");
     assert.ok(
-      readdirSync(source).some((f) => f.includes(".pre-schema-5-")),
+      readdirSync(source).some((f) => f.includes(".pre-schema-6-")),
       "automatic pre-upgrade snapshot",
     );
   });
@@ -514,7 +514,8 @@ test("migration collision rolls back every schema change and preserves original 
   for (const [extra, message] of [
     [{ kind: "assessment", prefix: "FCT" }, /prefix FCT/],
     [{ kind: "fact", prefix: "CUSTOM" }, /kind fact already exists/],
-    [{ kind: "issue", prefix: "CUSTOM" }, /kind issue already exists/],
+    [{ kind: "issue_note", prefix: "CUSTOM" }, /kind issue_note already exists/],
+    [{ kind: "custom_note", prefix: "ISN" }, /prefix ISN/],
   ] as const) {
     const dir = mkdtempSync(join(tmpdir(), "rs-collision-"));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -617,4 +618,103 @@ test("directory rehearsal preserves account sessions and Curator databases along
     "Curator evidence conversation",
   );
   database.close();
+});
+
+test("schema 4 issue/ISS collision: four synthetic historical records survive archive, isolation and rollback", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rs-issue-collision-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const source = join(dir, "source"); mkdirSync(source);
+  schema2File(source, "acme");
+  const db = new NodeDb(companyFile(source, "acme"));
+  db.exec(readFileSync(new URL("./fixtures/schema4-issue-collision.sql", import.meta.url), "utf8"));
+  db.close();
+  const before = dump(source);
+  const { backupDirectory, restoreDirectory } = await import("../src/core/backup.ts");
+  const prior = join(dir, "prior"); await backupDirectory(source, prior, true);
+  const companies = new Companies(source), co = companies.get("acme");
+  assert.deepEqual(dump(source), before, "migration leaves records, bodies, revisions, keys, links and counters byte-for-byte unchanged");
+  for (let n = 1; n <= 4; n++) {
+    const ref = `ISS-${String(n).padStart(4, "0")}`;
+    assert.equal((run(co, admin, "record.get", { ref }) as Rec).kind, "issue");
+    assert.equal((run(co, admin, "record.history", { ref }) as Revision[]).length, 2);
+    assert.throws(() => run(co, admin, "record.patch", { ref, set: { title: "rewrite" } }), code("forbidden"));
+  }
+  assert.equal((run(co, admin, "archive.list", {}) as Rec[]).filter(r => r.kind === "issue").length, 4);
+  const note = run(co, admin, "record.create", { kind: "issue_note", body: { title: "Unassigned question", project_id: ID.project } }) as Rec;
+  assert.equal(note.key, "ISN-0001");
+  assert.throws(() => run(co, admin, "record.create", { kind: "issue", body: { title: "shadow workflow" } }), code("forbidden"));
+  const other = companies.create("other-co", "Other");
+  assert.throws(() => run(other, admin, "record.get", { ref: "ISS-0001" }), code("not_found"));
+  assert.equal((run(other, admin, "record.create", { kind: "issue_note", body: { title: "Other question" } }) as Rec).key, "ISN-0001");
+  companies.close();
+  const backup = join(dir, "after"); await backupDirectory(source, backup, true);
+  const restored = join(dir, "restored"); restoreDirectory(backup, restored);
+  const restoredCompanies = new Companies(restored);
+  assert.equal((run(restoredCompanies.get("acme"), admin, "record.history", { ref: "ISS-0004" }) as Revision[]).length, 2);
+  assert.equal((run(restoredCompanies.get("acme"), admin, "record.get", { ref: "ISN-0001" }) as Rec).kind, "issue_note"); restoredCompanies.close();
+  const rollback = join(dir, "rollback"); restoreDirectory(prior, rollback);
+  assert.deepEqual(dump(rollback), before);
+  const rolled = new NodeDb(companyFile(rollback, "acme"), { readOnly: true });
+  assert.equal(rolled.one<{v:string}>("select v from meta where k='schema_version'")!.v, "4"); rolled.close();
+});
+
+test("legacy migration derives assertion history and flags contradictory Journal scope without rewriting it", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rs-legacy-provenance-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  schema2File(dir, "acme");
+  const db = new NodeDb(companyFile(dir, "acme"));
+  const bodies = [
+    { title: "Original", body: "Original assertion", project_id: ID.project },
+    { title: "Original", body: "Revised assertion", project_id: ID.project },
+    { title: "Retitled", body: "Revised assertion", project_id: ID.project, source: "Synthetic citation" },
+  ];
+  db.run("insert into records values ('legacy-learning','KNW-0001','knowledge',3,?,0,'2026-09-01','2026-09-03','alex')", JSON.stringify(bodies[2]));
+  for (const [i, body] of bodies.entries())
+    db.run("insert into revisions(record_id,rev,body,archived,changed,op,actor,actor_kind,at) values ('legacy-learning',?,?,0,'[]',?,?,?,?)", i + 1, JSON.stringify(body), i ? "patch" : "import", i === 1 ? "hermes:acme" : "alex", i === 1 ? "agent" : "person", `2026-09-0${i + 1}`);
+  db.run("insert into records values ('project-b','PRJ-0002','project',1,'{\"title\":\"Other project\"}',0,'2026-09-01','2026-09-01','alex')");
+  db.run("insert into revisions(record_id,rev,body,archived,changed,op,actor,actor_kind,at) values ('project-b',1,'{\"title\":\"Other project\"}',0,'[\"title\"]','create','alex','person','2026-09-01')");
+  db.run("update records set body=json_set(body,'$.about_id',?,'$.project_id','project-b') where id=?", ID.project, ID.note);
+  db.close();
+  const before = dump(dir), companies = new Companies(dir), co = companies.get("acme");
+  t.after(() => companies.close());
+  assert.deepEqual(dump(dir), before);
+  const { projectContext } = await import("../src/core/context.ts");
+  const a = projectContext(co, ID.project), b = projectContext(co, "project-b");
+  const claim = a.knowledge[0]!;
+  assert.equal(claim.provenance.actor, "hermes:acme"); assert.equal(claim.provenance.rev, 2);
+  assert.equal(claim.last_edited.actor, "alex"); assert.equal(claim.citation_provenance.rev, 3);
+  assert.equal(claim.original.body.body, "Original assertion");
+  for (const context of [a, b]) {
+    assert.ok(!context.log.some(e => e.record.id === ID.note));
+    assert.equal(context.scope_conflicts[0]!.record.id, ID.note);
+  }
+  assert.equal((run(co, admin, "record.get", { ref: "JNL-0004" }) as Rec).body.project_id, "project-b");
+  assert.ok((run(co, admin, "journal.list", {}) as JournalItem[]).some(e => e.key === "JNL-0004"));
+});
+
+test("prior disposable schema 5 upgrades to distinct issue_note identity without changing old notes", (t) => {
+  const { dir, companies, acme } = setup(t);
+  const old = run(acme, admin, "record.create", { kind: "issue_note", body: { title: "Prior disposable note" } }) as Rec;
+  const migratedFact = run(acme, admin, "record.create", { kind: "fact", body: { title: "Original fact", subject: "Supplier", predicate: "lead_time", value_type: "number", value: 4 } }) as Rec;
+  run(acme, agent, "record.patch", { ref: migratedFact.id, set: { value: 6 } });
+  run(acme, admin, "record.patch", { ref: migratedFact.id, set: { title: "Retitled", source: "Synthetic citation" } });
+  companies.close();
+  const db = new NodeDb(companyFile(dir, "acme"));
+  db.run("insert into kinds select 'issue','ISS',title_field,statuses,refs from kinds where kind='issue_note'");
+  db.run("update records set kind='issue',key='ISS-0001' where id=?", old.id);
+  db.run("delete from kinds where kind='issue_note'");
+  db.run("update records_fts set key='ISS-0001' where id=?", old.id);
+  db.run("update key_counters set prefix='ISS' where prefix='ISN'");
+  db.run("update meta set v='5' where k='schema_version'"); db.close();
+  const before = dump(dir), upgraded = new Companies(dir);
+  t.after(() => upgraded.close());
+  const co = upgraded.get("acme"); assert.deepEqual(dump(dir), before);
+  assert.equal((run(co, admin, "record.get", { ref: "ISS-0001" }) as Rec).id, old.id);
+  assert.equal((run(co, admin, "archive.list", {}) as Rec[]).length, 1);
+  const context = run(co, admin, "record.context", { ref: migratedFact.id }) as ReturnType<typeof import("../src/core/records.ts").provenance>;
+  assert.equal(context.provenance.actor, agent.name); assert.equal(context.provenance.rev, 2);
+  assert.equal(context.last_edited.actor, admin.name); assert.equal(context.citation_provenance.rev, 3);
+  assert.equal(context.original.body.value, 4);
+
+  assert.equal((run(co, admin, "record.create", { kind: "issue_note", body: { title: "New note" } }) as Rec).kind, "issue_note");
 });

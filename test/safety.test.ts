@@ -20,7 +20,7 @@ test("isolation: one company's records cannot be read, found or referenced from 
   assert.throws(() => run(other, member, "record.get", { ref: secret.key }), code("not_found"));
   assert.deepEqual(run(other, member, "record.search", { q: "confidential-figure" }) as Hit[], []);
   assert.deepEqual(run(other, member, "changes.since", { since: 0 }), []);
-  assert.throws(() => run(other, member, "record.create", { kind: "issue", body: { title: "P", project_id: secret.id } }), code("invalid"));
+  assert.throws(() => run(other, member, "record.create", { kind: "issue_note", body: { title: "P", project_id: secret.id } }), code("invalid"));
   // An undeclared *_id that names another company's record is kept as plain text and makes no link.
   const n = rec(other, member, "record.create", { kind: "entry", body: { title: "N", source_id: secret.id } });
   assert.deepEqual(run(other, member, "record.links", { ref: n.key }), { out: [], in: [] });

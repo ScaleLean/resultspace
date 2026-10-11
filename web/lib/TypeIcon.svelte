@@ -13,7 +13,7 @@
   };
   const ALIAS: Record<string, string> = {
     entry: "note",
-    issue: "flag",
+    issue_note: "flag",
     artifact: "source",
     company: "project",
     learning: "knowledge",

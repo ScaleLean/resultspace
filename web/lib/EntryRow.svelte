@@ -6,6 +6,7 @@
   import TypeIcon from "./TypeIcon.svelte";
   import { clock } from "./fmt.ts";
   type E = {
+    project_scope?: { problem: string | null };
     rev?: number;
     updated_at?: string;
     original?: { actor: string; at: string };
@@ -20,6 +21,7 @@
   <TypeIcon type={e.type} />
   <div class="body">
     <Headline text={e.title} {slug} />
+    {#if e.project_scope?.problem}<p class="notice">{e.project_scope.problem}</p>{/if}
     <div class="meta">
       {#if (e.rev ?? 1) > 1}<span title="Current revision {e.rev}; created by {e.original?.actor}">edited by</span>{/if}
       <Avatar who={e.by} {slug} size={18} label />

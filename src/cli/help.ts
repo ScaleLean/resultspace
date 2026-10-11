@@ -5,7 +5,7 @@ rs project context PRJ-0001       Focused context with sources and evidence
 rs new project title="Launch" goal="..." objectives:='["..."]' current_state="..."
 rs new fact --body '{"title":"Lead time","subject":"Supplier A","predicate":"lead_time","value_type":"number","value":4,"unit":"weeks","source":"Supplier email dated ..."}'
 rs new knowledge title="Learning" body="..." source="..." project_id=PRJ-0001
-rs new issue title="Review packaging" project_id=PRJ-0001 status=open
+rs new issue_note title="Review packaging" project_id=PRJ-0001 status=open
 rs log "What changed" --project PRJ-0001 --type learning --text "..." --source "..."
 rs ls KIND | show KEY | set KEY field=value | search "words" | context KEY
 rs journal [--project KEY]        Meaningful log

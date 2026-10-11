@@ -7,7 +7,7 @@
 <div class="page">
   <h1>{data.label}</h1>
   <p class="lede">
-    {data.kind === "issue"
+    {data.kind === "issue_note"
       ? "Unassigned planning notes and questions."
       : data.kind === "fact"
         ? "Company claims with typed values and cited sources."
@@ -19,7 +19,7 @@
   </p>
   {#if form?.error}<p class="error" role="alert">{form.error}</p>{/if}
   <details class="card">
-    <summary class="btn">Write {data.kind}</summary>
+    <summary class="btn">Write {data.kind === "issue_note" ? "issue note" : data.kind}</summary>
     <form method="POST" action="?/create"><Author kind={data.kind} /><button class="btn primary">Save</button></form>
   </details>
   <div class="list">

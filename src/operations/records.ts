@@ -70,6 +70,8 @@ export const recordOperations: Operation[] = [
       const r = records.need(ctx.company, i.ref);
       return {
         record: r,
+        ...records.provenance(ctx.company, r),
+        project_scope: records.projectScope(ctx.company, r),
         legacy: records.isLegacy(ctx.company, r.id),
         links: records.links(ctx.company, r.id),
         history: records

@@ -90,7 +90,7 @@ test("focused context, typed facts and contradiction evidence preserve both clai
     detail: "Confirm the scope first",
   });
   const issues = rec(acme, member, "record.create", {
-    kind: "issue",
+    kind: "issue_note",
     body: {
       title: "Clarify conflicting quotes",
       project_id: project.id,
@@ -284,7 +284,7 @@ test("Curator is limited to sourced flags and suggestions; writes never acquire 
   assert.throws(
     () =>
       rec(acme, member, "record.create", {
-        kind: "issue",
+        kind: "issue_note",
         body: { title: "Unassigned", owner: "hermes" },
       }),
     /retired/,
@@ -422,4 +422,46 @@ test("project source inventory includes a fact-only citation once; learning requ
   assert.equal(context().log[0]!.record.id, learned.id);
   assert.deepEqual(context().sources, []);
   rec(acme, member, "journal.log", { title: "Author's sourced claim", type: "learning", source: "Supplier email" });
+});
+
+test("two actors retain original/value assertion provenance through metadata, citation, dimension edits and undo", (t) => {
+  const { acme } = setup(t);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-01T00:00:00Z") });
+  const editor = { ...member, name: "second-member" };
+  const project = rec(acme, member, "record.create", { kind: "project", body: { title: "Launch" } });
+  const claim = rec(acme, member, "record.create", { kind: "fact", body: { ...fact(project.id, [], 4), source: "Original quote" } });
+  const read = () => (run(acme, viewer, "project.context", { ref: project.id }) as ProjectContext).facts[0]!;
+  assert.equal(read().provenance.actor, member.name);
+  t.mock.timers.setTime(Date.parse("2026-10-02T00:00:00Z"));
+  rec(acme, editor, "record.patch", { ref: claim.key, set: { value: 6 } });
+  assert.deepEqual([read().provenance.actor, read().provenance.rev, read().provenance.at], [editor.name, 2, "2026-10-02T00:00:00.000Z"]);
+  t.mock.timers.setTime(Date.parse("2026-10-03T00:00:00Z"));
+  rec(acme, member, "record.patch", { ref: claim.key, set: { title: "Renamed", comment: "Metadata only" } });
+  assert.equal(read().provenance.actor, editor.name);
+  assert.equal(read().provenance.rev, 2);
+  assert.equal(read().last_edited.actor, member.name);
+  t.mock.timers.setTime(Date.parse("2026-10-04T00:00:00Z"));
+  rec(acme, member, "record.patch", { ref: claim.key, set: { source: "Replacement citation" } });
+  assert.equal(read().provenance.rev, 2);
+  assert.equal(read().citation_provenance.rev, 4);
+  assert.equal(read().citation_provenance.actor, member.name);
+  rec(acme, editor, "record.undo", { ref: claim.key });
+  assert.equal(read().provenance.rev, 2, "citation undo does not assert the value");
+  rec(acme, member, "record.patch", { ref: claim.key, set: { value: 8 } });
+  rec(acme, editor, "record.undo", { ref: claim.key });
+  assert.equal(read().record.body.value, 6);
+  assert.equal(read().provenance.rev, 7, "restoring a value is a new assertion, not backdated attribution");
+  assert.equal(read().provenance.actor, editor.name);
+  for (const field of ["subject", "predicate", "scope", "unit", "value_type", "observed_at"]) {
+    const before = read().record.rev;
+    const set = field === "value_type" ? { value_type: "text", value: "six" } : { [field]: field === "observed_at" ? "2026-10-05" : `changed ${field}` };
+    rec(acme, member, "record.patch", { ref: claim.key, set });
+    assert.equal(read().provenance.rev, before + 1, `${field} defines the claim`);
+    rec(acme, editor, "record.undo", { ref: claim.key });
+    assert.equal(read().provenance.actor, editor.name);
+  }
+  assert.equal(read().original.actor, member.name);
+  assert.equal(read().original.body.value, 4);
+  assert.equal(read().original.body.source, "Original quote");
+  assert.equal(read().original.rev, 1);
 });

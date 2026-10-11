@@ -24,52 +24,37 @@ export function briefText(co: Company, _agent: string | null, budget = 4000): st
 }
 export function journalItems(
   co: Company,
-  o: { type?: string | undefined; since?: string | undefined; limit?: number | undefined; project?: string | undefined;
-  } = {},
+  o: { type?: string | undefined; since?: string | undefined; limit?: number | undefined; project?: string | undefined } = {},
 ) {
-  const filters = ["kind = 'entry'", "archived = 0", "id not in (select record_id from legacy_records)"];
-  const args: (string | number)[] = [];
-  if (o.type) {
-    filters.push("json_extract(body, '$.type') = ?");
-    args.push(o.type);
-  }
-  if (o.project) {
-    filters.push("json_extract(body, '$.project_id') = ?");
-    args.push(records.need(co, o.project).id);
-  }
-  if (o.since) {
-    filters.push("created_at >= ?");
-    args.push(sinceTime(o.since, 24));
-  }
-  return co
-    .all<{ id: string }>(`select id from records where ${filters.join(" and ")} order by created_at desc, key desc limit ?`, ...args, o.limit ?? 50)
-    .map(({ id }) => {
-      const r = records.need(co, id);
-      const history = records.history(co, id);
-      const first = history[0]!;
-      const last = history.at(-1)!;
-      return {
-        key: r.key,
-        type: String(r.body.type ?? "note"),
-        at: r.created_at,
-        by: last.actor,
-        rev: last.rev,
-        updated_at: last.at,
-        original: {
-          actor: first.actor,
-          actor_kind: first.actor_kind,
-          at: first.at,
-          rev: first.rev,
-          body: first.body,
-        },
-        title: records.titleOf(co, r),
-        detail: r.body.detail ?? r.body.text ?? null,
-        source: r.body.source ?? null,
-        source_ids: r.body.source_ids ?? [],
-        project: typeof r.body.project_id === "string" ? (records.get(co, r.body.project_id)?.key ?? null) : null,
-        about: typeof r.body.about_id === "string" ? (records.get(co, r.body.about_id) ?? null) : null,
-      };
-    });
+  return records.journalRecords(co, { ...o, since: o.since ? sinceTime(o.since, 24) : undefined }).map((r) => {
+    const history = records.history(co, r.id);
+    const first = history[0]!;
+    const last = history.at(-1)!;
+    const scope = records.projectScope(co, r);
+    return {
+      key: r.key,
+      type: String(r.body.type ?? "note"),
+      at: r.created_at,
+      by: last.actor,
+      rev: last.rev,
+      updated_at: last.at,
+      original: {
+        actor: first.actor,
+        actor_kind: first.actor_kind,
+        at: first.at,
+        rev: first.rev,
+        body: first.body,
+      },
+      title: records.titleOf(co, r),
+      detail: r.body.detail ?? r.body.text ?? null,
+      source: r.body.source ?? null,
+      source_ids: r.body.source_ids ?? [],
+      claim_provenance: records.provenance(co, r).provenance,
+      project_scope: scope,
+      project: scope.project_id ? records.need(co, scope.project_id).key : null,
+      about: typeof r.body.about_id === "string" ? (records.get(co, r.body.about_id) ?? null) : null,
+    };
+  });
 }
 export type JournalItem = ReturnType<typeof journalItems>[number];
 export function activityItems(co: Company, since: string, limit: number) {

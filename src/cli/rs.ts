@@ -442,7 +442,7 @@ const json = argv.includes("--json");
 try {
   const { command, out } = await main(argv);
   console.log(
-    json ? JSON.stringify({ ok: true, command, data: out.data, schema_version: 5, warnings: [] }, null, 2) : out.text,
+    json ? JSON.stringify({ ok: true, command, data: out.data, schema_version: 6, warnings: [] }, null, 2) : out.text,
   );
 } catch (e) {
   const err = e instanceof CliError ? e : new CliError(1, "error", e instanceof Error ? e.message : String(e));

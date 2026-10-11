@@ -6,7 +6,7 @@ Independent review rejected release of the first knowledge-first implementation.
 
 Chris's review reports the default installed plugin at **0.14.0**, and **the default configuration plus seven named configurations** using the retired `resultspace-memory` provider. This turn has not inspected or modified installed plugins, profiles, skills or live company data. The seven configuration names were not supplied; record their exact names in the reviewed upgrade inventory rather than guessing or leaving them out.
 
-Target is ResultSpace server **0.4.0 / schema 5** and repo plugin **0.15.0**, with `rs_context` and explicit sourced `rs_learn`. The installed `rs_recall`, `rs_remember`, `rs_act` and `rs_work` interfaces do not remain supported after this coordinated upgrade. Old operation families return errors; there are no inert success responses, task compatibility handlers or permission-authority shims.
+Target is ResultSpace server **0.4.0 / schema 6** and repo plugin **0.15.0**, with `rs_context` and explicit sourced `rs_learn`. The installed `rs_recall`, `rs_remember`, `rs_act` and `rs_work` interfaces do not remain supported after this coordinated upgrade. Old operation families return errors; there are no inert success responses, task compatibility handlers or permission-authority shims.
 
 | Retired client use | Reviewed replacement |
 | --- | --- |
@@ -43,4 +43,4 @@ Record release hashes, the exact eight config names, identity assertions, comman
 
 After independent review, the live backup/restore rehearsal, and all eight disposable client/provider smoke tests pass, an operator can separately authorize a coordinated maintenance window. Quiesce writers, take the reviewed consistent backup and configuration/memory snapshots, then upgrade server and all eight clients as one compatibility boundary. Keep writers quiesced until identity, context, record/readback and memory smoke tests pass. Do not leave 0.14.0 clients or `resultspace-memory` attached to the new server.
 
-For a failed rehearsal or future cutover, restore the complete original server data under the original code/dependencies, and restore the matching original plugin/provider/profile/memory copies. Preserve any post-upgrade writes separately; old code must not open schema 5 databases. No step in this plan was executed on installed clients or live data in this turn.
+For a failed rehearsal or future cutover, restore the complete original server data under the original code/dependencies, and restore the matching original plugin/provider/profile/memory copies. Preserve any post-upgrade writes separately; old code must not open schema 6 databases. No step in this plan was executed on installed clients or live data in this turn.

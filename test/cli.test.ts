@@ -156,3 +156,18 @@ test("real API + CLI focused project read and sourced record path", async (t) =>
   assert.equal((await rs("project", "context", project, "-C", "other-co", "--json")).code, 4);
   assert.equal((await rs("skills", "sync", "--json")).code, 2);
 });
+
+test("CLI Journal scope rejects conflicting project/about through log, generic creation and patch", async (t) => {
+  const { rs } = await world(t);
+  for (const name of ["A", "B"]) assert.equal((await rs("new", "project", `title=${name}`)).code, 0);
+  assert.equal((await rs("new", "knowledge", "title=A claim", "body=Scoped A", "project_id=PRJ-0001")).code, 0);
+  for (const about of ["PRJ-0001", "KNW-0001"]) {
+    assert.notEqual((await rs("log", "Conflict", "--about", about, "--project", "PRJ-0002")).code, 0);
+    assert.notEqual((await rs("new", "entry", "title=Conflict", `about_id=${about}`, "project_id=PRJ-0002")).code, 0);
+  }
+  const entry = await rs("log", "Inherited A", "--about", "KNW-0001", "--json");
+  assert.equal(entry.code, 0, entry.err);
+  assert.notEqual((await rs("set", String(entry.json().data.key), "project_id=PRJ-0002")).code, 0);
+  assert.equal(((await rs("project", "context", "PRJ-0001", "--json")).json().data.log as Json[]).length, 1);
+  assert.deepEqual((await rs("project", "context", "PRJ-0002", "--json")).json().data.log, []);
+});

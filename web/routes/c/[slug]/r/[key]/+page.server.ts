@@ -1,11 +1,11 @@
 import { need, fail_of, str } from "#lib/server/rs.ts";
 import { authorBody } from "#lib/server/author.ts";
-import type { Rec, Revision, Link } from "../../../../../../src/core/records.ts";
+import type { Rec, Revision, Link, provenance, projectScope } from "../../../../../../src/core/records.ts";
 import type { ProjectContext } from "../../../../../../src/core/context.ts";
 import type { Actions, PageServerLoad } from "./$types";
 export const load: PageServerLoad = ({ locals, params }) => {
   const ctx = need(
-    locals.rs.run<{ record: Rec; legacy: boolean; links: { out: Link[]; in: Link[] } }>(params.slug, "record.context", { ref: params.key }),
+    locals.rs.run<ReturnType<typeof provenance> & { project_scope: ReturnType<typeof projectScope>; record: Rec; legacy: boolean; links: { out: Link[]; in: Link[] } }>(params.slug, "record.context", { ref: params.key }),
   );
   return {
     ...ctx,

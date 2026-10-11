@@ -1,14 +1,14 @@
-# Schema 5 migration and rollback rehearsal
+# Schema 6 migration and rollback rehearsal
 
 Release gate: independent review plus a consistent whole-server backup/restore rehearsal from live data into disposable copies. This worktree has not performed that live rehearsal and must not be deployed or merged yet.
 
 ## Preserved data
 
-Schemas 2, 3 and 4 upgrade directly to 5 in one transaction. Every record's current kind/body/id/key/revision/author/time/archive state stays verbatim. Revisions, links, search rows, blobs, agents, hashed keys, counters and operation outcomes remain. No user rows are deleted. Kind definitions stay in the database; supported built-in reference fields are added, retaining prior company-specific references.
+Schemas 2, 3, 4 and prior disposable 5 upgrade directly to 6 in one transaction. Every record's current kind/body/id/key/revision/author/time/archive state stays verbatim. Revisions, links, search rows, blobs, agents, hashed keys, counters and operation outcomes remain. No user rows are deleted. Kind definitions stay in the database; supported built-in reference fields are added, retaining prior company-specific references.
 
 `legacy_records` maps retired/custom kinds and raw session/action entries to a read-only archive. API writes and a SQLite trigger refuse edits, archive/restore and undo. Original keys resolve for reading, links and full history. Presence and evidence-authority tables become `legacy_presence` and `legacy_evidence_authority`, with their rows preserved and writes disabled. Assignments, tasks, goals, approvals and separate skills are not automatically converted into new planning notes or trusted claims.
 
-When a schema 2/3/4 file is opened with the correct slug, `Company.open` writes a mode-0600 consistent SQLite snapshot named `<slug>.sqlite.pre-schema-5-<timestamp>.backup` before migration. Migration conflicts (such as an existing FCT prefix) abort atomically; review a disposable copy and choose a mapping before retrying. This snapshot covers only that company file, not accounts, Curator conversations or external runtime configuration.
+When a schema 2/3/4 file is opened with the correct slug, `Company.open` writes a mode-0600 consistent SQLite snapshot named `<slug>.sqlite.pre-schema-6-<timestamp>.backup` before migration. Migration conflicts (such as an existing FCT prefix) abort atomically; review a disposable copy and choose a mapping before retrying. This snapshot covers only that company file, not accounts, Curator conversations or external runtime configuration.
 
 ## Disposable rehearsal
 
@@ -26,7 +26,7 @@ On the disposable restored directory, check company isolation, old and new recor
 
 ## Rollback
 
-Keep the complete pre-upgrade backup and prior code/dependencies. Restore the backup into a separate new directory and verify its original schema version and data before any cutover. Old code must use those original schema files; it must never open schema 5 data. Rehearse authentication and old-key reads under the prior release. Preserve any schema 5 writes made after cutover as a separate evidence copy: restoring a pre-upgrade backup does not include later writes.
+Keep the complete pre-upgrade backup and prior code/dependencies. Restore the backup into a separate new directory and verify its original schema version and data before any cutover. Old code must use those original schema files; it must never open schema 6 data. Rehearse authentication and old-key reads under the prior release. Preserve any schema 6 writes made after cutover as a separate evidence copy: restoring a pre-upgrade backup does not include later writes.
 
 The automated tests rehearse migration, preserved rows, complete directory backup/restore, credential/account sessions and rollback on disposable fixtures. They do not substitute for the live-data rehearsal.
 
@@ -37,3 +37,11 @@ Server 0.4.0 removes assignment/work, permission/action, presence/receipt, appro
 Installed Hermes profiles and skills have not been changed. If an installed profile still uses the retired `resultspace-memory` provider, replace it with a supported runtime memory provider during the reviewed upgrade. Long-term skill ownership remains undecided.
 
 The reported installed default plugin is 0.14.0, and the default plus seven named configurations use the retired memory provider. Follow the [coordinated installed-client migration plan](INSTALLED-CLIENT-MIGRATION.md); all eight disposable client/provider smoke tests are required before a future coordinated cutover. This plan has not changed installed profiles.
+
+## Legacy issue collision: explicit identity split
+
+The operator reports `clinical-effects` schema 4 already has kind `issue`, prefix `ISS`, and four records. These semantics are unknown. Schema 6 preserves that kind definition and every `ISS` record/id/key/body/revision/link/counter verbatim, marks the records in `legacy_records`, and refuses writes through the API and record-update trigger. Old keys, full history, archive and record pages remain readable. No source keys are rewritten and no records are converted into planning notes.
+
+New unassigned planning notes have kind **`issue_note`**, prefix **`ISN`**, with web label **Issues**. Generic clients must use `record.create {kind:"issue_note", ...}` / `rs new issue_note`; `issue` is not a compatibility alias. Prior disposable schema-5 issue records are also archived unchanged when moving to 6. Existing `fact`/`FCT` or `issue_note`/`ISN` collisions still abort transactionally for explicit mapping; they are not assumed equivalent.
+
+The synthetic fixture `test/fixtures/schema4-issue-collision.sql` reproduces the reported schema/kind/prefix/four-record shape, using invented bodies and two revisions each. No live or sensitive copied contents were inspected. Automated checks cover exact preservation, old-key/history reads, read-only rejection, new note creation, isolation, post-upgrade backup/restore and schema-4 rollback. This does not prove the actual copy passes migration. The operator must rerun the company-list/migration and preservation comparisons on a fresh restored copy of the quiesced backup with this reviewed commit, including all eight companies, before live upgrade. The reported healthy live restart was not a live upgrade.

@@ -2,7 +2,7 @@
 import type { Db } from "./db.ts";
 import { invalid } from "./errors.ts";
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 // Refuses a statement outright: used for "never delete" and "history is append-only".
 const forbid = (name: string, when: string, table: string, message: string) =>
@@ -173,8 +173,8 @@ export const BUILTIN_KINDS: KindDef[] = [
     },
   },
   {
-    kind: "issue",
-    prefix: "ISS",
+    kind: "issue_note",
+    prefix: "ISN",
     title_field: "title",
     statuses: ["open", "resolved", "dismissed"],
     refs: { project_id: "project", about_id: null, source_ids: "source" },
@@ -220,8 +220,19 @@ export type EntryType = (typeof ENTRY_TYPES)[number];
 
 /** Schemas 2, 3 and 4 upgrade directly: old bodies and kind names are preserved verbatim. */
 export const UPGRADES: Record<number, string | ((db: Db) => void)> = {
-  5: knowledgeUpgrade,
+  6: upgradeKnowledge,
 };
+
+/** Schema 5 was an unreleased branch format; archive its issue records rather than recasting their keys. */
+function upgradeKnowledge(db: Db): void {
+  if (db.one<{ v: string }>("select v from meta where k = 'schema_version'")?.v !== "5") return knowledgeUpgrade(db);
+  db.run("insert or ignore into legacy_records select id, kind, 'historical issue identity retired in schema 6' from records where kind = 'issue'");
+  const note = BUILTIN_KINDS.find((k) => k.kind === "issue_note")!;
+  if (db.one("select 1 from kinds where kind = ? or prefix = ?", note.kind, note.prefix))
+    throw invalid("cannot upgrade: issue_note/ISN already exists; review a disposable migration mapping");
+  db.run("insert into kinds values (?, ?, ?, ?, ?)", note.kind, note.prefix, note.title_field, JSON.stringify(note.statuses), JSON.stringify(note.refs));
+  db.run("insert into meta values ('upgrade_6', ?)", JSON.stringify({ at: new Date().toISOString(), cutoff: "0.4.0", archived: db.one<{ n: number }>("select count(*) as n from legacy_records")!.n }));
+}
 
 /** No records, revisions, links, counters, credentials, blobs or op outcomes are rewritten or removed. */
 function knowledgeUpgrade(db: Db): void {
@@ -230,13 +241,13 @@ function knowledgeUpgrade(db: Db): void {
   for (const k of db.all<{ kind: string }>("select kind from kinds")) {
     if (!live.has(k.kind))
       db.run(
-        "insert into legacy_records select id, kind, 'retired in schema 5' from records where kind = ?",
+        "insert into legacy_records select id, kind, 'retired in schema 6' from records where kind = ?",
         k.kind,
       );
   }
   // Raw runtime traces are historical evidence; keep them out of the meaningful project log.
   db.run(
-    "insert or ignore into legacy_records select id, kind, 'runtime trace retired in schema 5' from records where kind = 'entry' and json_extract(body, '$.type') in ('session', 'action')",
+    "insert or ignore into legacy_records select id, kind, 'runtime trace retired in schema 6' from records where kind = 'entry' and json_extract(body, '$.type') in ('session', 'action')",
   );
   for (const k of BUILTIN_KINDS) {
     const existing = db.one<{ prefix: string }>(
@@ -257,7 +268,7 @@ function knowledgeUpgrade(db: Db): void {
         JSON.stringify(k.refs),
       );
     } else {
-      if (k.kind === "fact" || k.kind === "issue")
+      if (k.kind === "fact" || k.kind === "issue_note")
         throw invalid(
           `cannot upgrade: kind ${k.kind} already exists; review a migration mapping on a disposable copy`,
         );
@@ -287,7 +298,7 @@ function knowledgeUpgrade(db: Db): void {
     }
   }
   db.run(
-    "insert into meta values ('upgrade_5', ?)",
+    "insert into meta values ('upgrade_6', ?)",
     JSON.stringify({
       at: new Date().toISOString(),
       cutoff: "0.4.0",

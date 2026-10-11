@@ -2,7 +2,7 @@
 
 ResultSpace is a phone-readable project and company knowledge base. A project states its goal, objectives and current state, links to structured facts and organic knowledge, and has a meaningful chronological log. Issue notes describe upcoming questions or steps; they have no owner, claim or dispatch lifecycle.
 
-The active kinds are project, fact, knowledge, entry (outcome/learning/note), issue, source, flag and briefing. Company, decision and artifact records remain supporting content. Facts use subject/property/value, text/number/boolean value type, scope/unit, observation date and citations. Knowledge is freeform and may hold sourced method learnings. Existing company-specific kinds are archived read-only during migration rather than interpreted or converted automatically.
+The active kinds are project, fact, knowledge, entry (outcome/learning/note), issue_note (displayed as Issues), source, flag and briefing. Company, decision and artifact records remain supporting content. Facts use subject/property/value, text/number/boolean value type, scope/unit, observation date and citations. Knowledge is freeform and may hold sourced method learnings. Existing company-specific kinds are archived read-only during migration rather than interpreted or converted automatically.
 
 `project.context` retrieves explicit links and citations, returning each record with server-attributed revision provenance and sources. Its log is chronological. It returns a truncation indicator; company-wide search provides broader discovery. It does not invent relevance or execute work. Projects may share company facts by linking the same records.
 

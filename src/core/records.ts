@@ -203,6 +203,54 @@ export function links(co: Company, ref: string): { out: Link[]; in: Link[] } {
   return { out: q("from_id", "to_id"), in: q("to_id", "from_id") };
 }
 
+/** A Journal belongs to one project. About/citations do not grant additional project membership. */
+export function projectScope(co: Company, r: Pick<Rec, "kind" | "body">) {
+  const project = (ref: unknown) => {
+    const target = typeof ref === "string" ? get(co, ref) : undefined;
+    return target?.kind === "project" ? target.id : null;
+  };
+  const declared = project(r.body.project_id);
+  const about = r.kind === "entry" && typeof r.body.about_id === "string" ? get(co, r.body.about_id) : undefined;
+  const inherited = about?.kind === "project" ? about.id : project(about?.body.project_id);
+  const problem = r.body.project_id && !declared ? "Unknown historical project reference" :
+    declared && inherited && declared !== inherited ? "Conflicting historical about/project references" : null;
+  return { project_id: problem ? null : declared ?? inherited, declared, inherited, problem };
+}
+
+/** Current assertion, original record and last edit are distinct facts in append-only history. */
+export function provenance(co: Company, r: Rec) {
+  const versions = history(co, r.id);
+  const first = versions[0]!;
+  const last = versions.at(-1)!;
+  const fields = r.kind === "fact" ? ["subject", "predicate", "value_type", "value", "scope", "unit", "observed_at", "project_id"] :
+    r.kind === "knowledge" ? ["body", "text", "project_id", ...(!r.body.body && !r.body.text ? ["title"] : [])] :
+    r.kind === "entry" ? ["type", "title", "detail", "text", "about_id", "project_id"] : null;
+  const changedLast = (wanted: string[] | null) => wanted === null ? last : versions.reduce((assertion, v, i) =>
+    i === 0 || wanted.some((field) => stable(versions[i - 1]!.body[field]) !== stable(v.body[field])) ? v : assertion, first);
+  const stamp = (v: Revision) => ({ actor: v.actor, actor_kind: v.actor_kind, at: v.at, rev: v.rev, why: v.why });
+  return {
+    provenance: stamp(changedLast(fields)),
+    last_edited: stamp(last),
+    citation_provenance: stamp(changedLast(["source", "source_ids", "url"])),
+    original: { ...stamp(first), body: first.body },
+  };
+}
+
+/** SQL creation order, with canonical scope filtering before any pagination cap. */
+export function journalRecords(co: Company, o: { type?: string | undefined; since?: string | undefined; project?: string | undefined; limit?: number | null | undefined } = {}): Rec[] {
+  const filters = ["kind = 'entry'", "archived = 0", "id not in (select record_id from legacy_records)"];
+  const args: (string | number)[] = [];
+  if (o.type) { filters.push("json_extract(body, '$.type') = ?"); args.push(o.type); }
+  if (o.since) { filters.push("created_at >= ?"); args.push(o.since); }
+  const project = o.project ? need(co, o.project).id : null;
+  const limit = o.limit === undefined ? 50 : o.limit;
+  // Historical rows may lack project_id or conflict with about_id. Resolve with the same core invariant
+  // as writes; no limit is applied before this filter and no stored historical row is rewritten.
+  const rows = co.all<{ id: string }>(`select id from records where ${filters.join(" and ")} order by created_at desc, key desc`, ...args)
+    .map(({ id }) => need(co, id)).filter((r) => !project || projectScope(co, r).project_id === project);
+  return limit === null ? rows : rows.slice(0, limit);
+}
+
 // ---- Writes ----
 
 export const isLegacy = (co: Company, ref: string): boolean =>
@@ -314,6 +362,15 @@ function checked(co: Company, kind: KindDef, body: Body, prev: Body | null): Bod
     }
     if (field.endsWith("_id")) out[field] = resolve(field, value);
     else if (field.endsWith("_ids") && Array.isArray(value)) out[field] = value.map((v) => resolve(field, v));
+  }
+  if (kind.kind === "entry") {
+    const scope = projectScope(co, { kind: "entry", body: out });
+    if (scope.problem) throw invalid("Journal about/project references must identify the same project; repair conflicting links explicitly");
+    if (!out.project_id && scope.inherited && (!prev || touched("about_id") || touched("project_id"))) {
+      const project = need(co, scope.inherited);
+      if (project.archived || isLegacy(co, project.id)) throw invalid("Journal project is archived or legacy");
+      out.project_id = scope.inherited;
+    }
   }
   return out;
 }
@@ -439,6 +496,16 @@ export function patch(co: Company, who: Who, ref: string, set: Body, m: WriteMet
       else next[k] = v;
     }
     const clean = checked(co, kind, next, cur.body);
+    if (cur.kind !== "entry" && "project_id" in kind.refs && stable(cur.body.project_id) !== stable(clean.project_id)) {
+      const nextProject = projectScope(co, { kind: cur.kind, body: clean }).project_id;
+      const dependents = co.all<{ id: string }>("select id from records where kind = 'entry' and id not in (select record_id from legacy_records) and json_extract(body, '$.about_id') in (?, ?)", cur.id, cur.key);
+      for (const { id } of dependents) {
+        const entry = need(co, id);
+        const declared = projectScope(co, entry).declared;
+        if (declared && nextProject && declared !== nextProject)
+          throw invalid(`${cur.key}: project change conflicts with Journal ${entry.key}; repair its about/project links explicitly first`);
+      }
+    }
     const changed = changedFields(cur.body, clean);
     if (!changed.length) return cur;
     const r: Rec = { ...cur, rev: cur.rev + 1, body: clean, updated_at: new Date().toISOString(), updated_by: who.name };
@@ -477,12 +544,6 @@ export function logEntry(
   extra: Body = {},
 ): Rec {
   const body: Body = { type, title: text.trim().slice(0, 300), ...extra };
-  if (about) {
-    body.about_id = about.id;
-    if (about.kind === "project") body.project_id ??= about.id;
-    else if (typeof about.body.project_id === "string" && get(co, about.body.project_id)?.kind === "project")
-      body.project_id ??= about.body.project_id;
-  }
-  for (const f of ["project_id"]) if (typeof body[f] === "string" && get(co, body[f])?.archived) delete body[f];
+  if (about) body.about_id = about.id;
   return create(co, who, "entry", body, m);
 }

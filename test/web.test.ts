@@ -334,6 +334,21 @@ test("web: authenticated author/read path for projects, facts, learning, issues,
   const editedContext = await (await s.get(path)).text();
   assert.match(editedContext, /Supplier withdrew confirmation/);
   assert.match(editedContext, /review-editor/);
+  const valueEdit = await fetch(s.base + "/v1/op/record.patch", {
+    method: "POST", headers: { authorization: `Bearer ${editKey}`, "content-type": "application/json" },
+    body: JSON.stringify({ ref: "FCT-0001", set: { value: 8 }, why: "Revised quote" }),
+  });
+  assert.equal(valueEdit.status, 200);
+  const metadataEdit = await s.post(factPath + "?/patch", { title: "Lead time retitled", value: "8", value_type: "number", source: "Quote A dated Oct 11, additional citation", rev: "2" });
+  assert.equal(metadataEdit.status, 200, await metadataEdit.text());
+  for (const readPath of [factPath, path]) {
+    const claimHtml = await (await s.get(readPath)).text();
+    assert.match(claimHtml, /Claim asserted: review-editor[^<]*revision 2/);
+    assert.match(claimHtml, /Last edited: alex[^<]*revision 3/);
+    assert.match(claimHtml, /Citations last changed: alex[^<]*revision 3/);
+    assert.match(claimHtml, /Original record: alex/);
+    assert.match(claimHtml, /&quot;value&quot;: 4|"value": 4/);
+  }
   const preservedLog = await (await s.get("/c/acme/r/JNL-0001")).text();
   assert.match(preservedLog, /Quote compared/);
   assert.match(preservedLog, /Revision 1/);

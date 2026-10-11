@@ -14,7 +14,7 @@ export function upkeepFindings(co: Company, max = 100): Finding[] {
   const live = co
     .all<{ id: string }>(
       `select id from records where archived = 0 and id not in (select record_id from legacy_records)
-    and (kind in ('fact','knowledge','project','issue') or (kind = 'entry' and json_extract(body, '$.type') = 'learning')) order by key`,
+    and (kind in ('fact','knowledge','project','issue_note') or (kind = 'entry' and json_extract(body, '$.type') = 'learning')) order by key`,
     )
     .map((x) => records.need(co, x.id));
   const out: Finding[] = [];
@@ -44,7 +44,7 @@ export function upkeepFindings(co: Company, max = 100): Finding[] {
       if (Date.parse(date) < Date.now() - 90 * 86400000) add("stale", [r], `Last observation or update ${date}; confirm it still holds.`);
     }
     if (
-      ["project", "issue"].includes(r.kind) &&
+      ["project", "issue_note"].includes(r.kind) &&
       !["complete", "resolved", "dismissed", "archived"].includes(String(r.body.status)) &&
       Date.parse(r.updated_at) < Date.now() - 21 * 86400000
     )

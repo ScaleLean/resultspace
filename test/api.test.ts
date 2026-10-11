@@ -133,3 +133,31 @@ test("log and project context credit a second authenticated editor while preserv
   assert.equal((await call(editorKey, "POST", "/v1/op/record.patch", { ref: original.key, set: { type: "learning" } })).status, 400,
     "generic patch cannot turn an unsourced note into learning");
 });
+
+test("canonical Journal scope rejects cross-project about/create/patch and keeps shared claim citations out of another log", async (t) => {
+  const { acme, keys, call } = await serve(t);
+  const op = async (name: string, input: Json) => call(keys.acme, "POST", `/v1/op/${name}`, input);
+  const make = async (kind: string, body: Json) => (await op("record.create", { kind, body })).body.result as Json;
+  const a = await make("project", { title: "Project A" });
+  const b = await make("project", { title: "Project B" });
+  const fact = await make("fact", { title: "A fact", subject: "Supplier", predicate: "weeks", value_type: "number", value: 4, project_id: a.key });
+  const knowledge = await make("knowledge", { title: "A knowledge", body: "Scope A only", project_id: a.key });
+  for (const about of [a, fact, knowledge]) {
+    assert.equal((await op("journal.log", { title: "Bad scope", about: about.key, project: b.key })).status, 400);
+    assert.equal((await op("record.create", { kind: "entry", body: { title: "Bad generic scope", about_id: about.key, project_id: b.key } })).status, 400);
+    const entry = await make("entry", { title: "A event", about_id: about.key });
+    assert.equal((entry.body as Json).project_id, a.id);
+    assert.equal((await op("record.patch", { ref: entry.key, set: { project_id: b.key } })).status, 400);
+    assert.equal((await op("record.patch", { ref: entry.key, set: { about_id: b.key } })).status, 400);
+    assert.equal((await op("record.patch", { ref: entry.key, set: { title: `Mention ${String(b.key)}` } })).status, 200);
+  }
+  assert.equal((await op("record.patch", { ref: fact.key, set: { project_id: b.key } })).status, 400, "claim move cannot contradict dependent Journal scope");
+  await op("record.patch", { ref: b.key, set: { fact_ids: [fact.key], knowledge_ids: [knowledge.key] } });
+  const context = async (ref: unknown) => (await op("project.context", { ref })).body.result as Json;
+  assert.equal(((await context(a.key)).log as Json[]).length, 3);
+  assert.deepEqual((await context(b.key)).log, []);
+  assert.equal(((await context(b.key)).facts as Json[]).length, 1, "a fact may be explicitly shared without sharing its Journal");
+  assert.deepEqual((await op("journal.list", { project: b.key })).body.result, []);
+  assert.equal((await op("record.patch", { ref: b.key, set: { current_state: "References JNL-0001" } })).status, 200);
+  assert.deepEqual((await context(b.key)).log, [], "incidental backlinks never change Journal scope");
+});

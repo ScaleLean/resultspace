@@ -6,7 +6,7 @@
       {
         project: ["goal", "current_state"],
         knowledge: ["body", "source", "project_id"],
-        issue: ["detail", "project_id"],
+        issue_note: ["detail", "project_id"],
         entry: ["detail", "source", "project_id"],
         source: ["url", "detail"],
         fact: ["subject", "predicate", "scope", "unit", "source", "observed_at", "project_id"],
@@ -20,7 +20,7 @@
 </script>
 
 <label class="field"><span>Title</span><input name="title" value={text("title")} required maxlength="300" /></label>
-{#if ["project", "issue", "flag"].includes(kind)}<label class="field"
+{#if ["project", "issue_note", "flag"].includes(kind)}<label class="field"
     ><span>State</span><select name="status"
       >{#each kind === "project" ? ["planned", "active", "complete", "archived"] : kind === "flag" ? ["open", "fixed", "dismissed"] : ["open", "resolved", "dismissed"] as s}<option
           value={s}

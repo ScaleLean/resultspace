@@ -43,7 +43,7 @@ Fresh installs use the local owner trust mode. Set `RS_TRUST=none` when sign-in 
 
 ## Upgrade and review gate
 
-0.4.0 / schema 5 removes retired operations outright. Upgrade clients and plugin together. Old keys still resolve with `record.get` and `record.history`; retired records appear in a read-only legacy archive. Schemas 2/3/4 migrate directly, preserving bodies, ids, kinds, keys, links, full history, credentials, blobs, counters and operation outcomes. Unknown custom kinds are preserved in that archive. A per-company pre-upgrade SQLite snapshot is created automatically on file opening; it is not a whole-server backup.
+0.4.0 / schema 6 removes retired operations outright. Upgrade clients and plugin together. Old keys still resolve with `record.get` and `record.history`; retired records appear in a read-only legacy archive. Schemas 2/3/4 migrate directly, preserving bodies, ids, kinds, keys, links, full history, credentials, blobs, counters and operation outcomes. Unknown custom kinds are preserved in that archive. A per-company pre-upgrade SQLite snapshot is created automatically on file opening; it is not a whole-server backup.
 
 Do not merge or deploy this redesign before independent review and a consistent backup/restore rehearsal from live data into disposable copies. [Migration and rollback](docs/deploy/MIGRATION.md), [product contract](docs/design/KNOWLEDGE-FIRST.md), and [handoff](docs/HANDOFF-KNOWLEDGE-FIRST.md).
 
