@@ -13,7 +13,7 @@
   <p class="meta">{rec.key} · {rec.kind} · revision {rec.rev}</p>
   <h1>{title}</h1>
   <Provenance value={{ provenance: data.provenance, last_edited: data.last_edited, citation_provenance: data.citation_provenance, original: data.original }} claim={["fact", "knowledge", "entry"].includes(rec.kind)} />
-  {#if data.project_scope.problem}<p class="notice">{data.project_scope.problem}. Original data is retained; this record has no canonical project until its links are explicitly corrected.</p>{/if}
+  {#if data.project_scope.problem}<p class="notice">{data.project_scope.problem}. Original data is retained; this record has no canonical project. Append a new attributed entry to correct Journal scope.</p>{/if}
   {#if data.legacy}<p class="notice">Read-only legacy archive. Original keys, content and history are preserved.</p>{/if}
   {#if form?.error}<p class="error" role="alert">{form.error}</p>{/if}{#if form?.saved}<p class="notice">{form.saved}</p>{/if}
   {#each Object.entries(rec.body).filter(([k]) => !["title", "name", "evidence", "signature", "value_type"].includes(k) && !k.endsWith("_id") && !k.endsWith("_ids") && !k.startsWith("_")) as [k, v]}<section

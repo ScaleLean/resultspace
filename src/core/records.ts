@@ -364,12 +364,20 @@ function checked(co: Company, kind: KindDef, body: Body, prev: Body | null): Bod
     else if (field.endsWith("_ids") && Array.isArray(value)) out[field] = value.map((v) => resolve(field, v));
   }
   if (kind.kind === "entry") {
-    const scope = projectScope(co, { kind: "entry", body: out });
-    if (scope.problem) throw invalid("Journal about/project references must identify the same project; repair conflicting links explicitly");
-    if (!out.project_id && scope.inherited && (!prev || touched("about_id") || touched("project_id"))) {
-      const project = need(co, scope.inherited);
-      if (project.archived || isLegacy(co, project.id)) throw invalid("Journal project is archived or legacy");
-      out.project_id = scope.inherited;
+    if (prev) {
+      // Scope anchors are fixed at creation, including absent or historical anchors.
+      // Undo uses this same validation; archive/restore never changes the body.
+      for (const field of ["project_id", "about_id"])
+        if (stable(prev[field]) !== stable(out[field]))
+          throw invalid(`Journal ${field} is immutable after creation; append a new attributed correction entry`);
+    } else {
+      const scope = projectScope(co, { kind: "entry", body: out });
+      if (scope.problem) throw invalid("Journal about/project references must identify the same project");
+      if (!out.project_id && scope.inherited) {
+        const project = need(co, scope.inherited);
+        if (project.archived || isLegacy(co, project.id)) throw invalid("Journal project is archived or legacy");
+        out.project_id = scope.inherited;
+      }
     }
   }
   return out;
@@ -503,7 +511,7 @@ export function patch(co: Company, who: Who, ref: string, set: Body, m: WriteMet
         const entry = need(co, id);
         const declared = projectScope(co, entry).declared;
         if (declared && nextProject && declared !== nextProject)
-          throw invalid(`${cur.key}: project change conflicts with Journal ${entry.key}; repair its about/project links explicitly first`);
+          throw invalid(`${cur.key}: project change conflicts with Journal ${entry.key}; append a corrected claim and Journal entry instead`);
       }
     }
     const changed = changedFields(cur.body, clean);

@@ -37,8 +37,7 @@ def config_path(profile: str, env: Mapping[str, str] | None = None) -> Path:
     if e.get("RS_CONFIG"):
         return Path(e["RS_CONFIG"]).expanduser()
     base = Path(e.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "resultspace"
-    per = base / "profiles" / profile / "cli.toml"
-    return per if per.exists() else base / "cli.toml"
+    return base / "cli.toml" if profile == "default" else base / "profiles" / profile / "cli.toml"
 
 
 _SCALAR = (str, int, float, bool)

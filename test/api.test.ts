@@ -161,3 +161,78 @@ test("canonical Journal scope rejects cross-project about/create/patch and keeps
   assert.equal((await op("record.patch", { ref: b.key, set: { current_state: "References JNL-0001" } })).status, 200);
   assert.deepEqual((await context(b.key)).log, [], "incidental backlinks never change Journal scope");
 });
+
+test("Journal scope anchors stay immutable for parent, child and transitive child through patch, undo and restore", async (t) => {
+  const { acme, keys, call } = await serve(t);
+  const op = (name: string, input: Json) => call(keys.acme, "POST", `/v1/op/${name}`, input);
+  const make = async (kind: string, body: Json) => {
+    const result = await op("record.create", { kind, body });
+    assert.equal(result.status, 200);
+    return result.body.result as Json;
+  };
+  const a = await make("project", { title: "Original scope" });
+  const b = await make("project", { title: "Other scope" });
+  const parent = await make("entry", { title: "Parent", about_id: a.key });
+  const child = await make("entry", { title: "Child", about_id: parent.key });
+  const descendant = await make("entry", { title: "Transitive child", about_id: child.key });
+  const anchored = [parent, child, descendant];
+  const visible = async () => {
+    for (const entry of anchored) {
+      const read = (await op("record.get", { ref: entry.key })).body.result as Json;
+      assert.equal((read.body as Json).project_id, a.id);
+      assert.equal((read.body as Json).about_id, (entry.body as Json).about_id);
+    }
+    const context = (await op("project.context", { ref: a.key })).body.result as Json;
+    assert.deepEqual((context.log as Json[]).map(e => (e.record as Json).id).sort(), anchored.map(e => e.id).sort());
+    const log = (await op("journal.list", { project: a.key })).body.result as Json[];
+    assert.deepEqual(log.map(e => e.key).sort(), anchored.map(e => e.key).sort());
+    assert.deepEqual(((await op("project.context", { ref: b.key })).body.result as Json).log, []);
+    assert.deepEqual((await op("journal.list", { project: b.key })).body.result, []);
+  };
+  await visible();
+  for (const entry of anchored) {
+    for (const set of [
+      { project_id: b.key, about_id: b.key }, { project_id: null }, { about_id: null },
+      { about_id: entry.key }, { about_id: descendant.key },
+    ]) {
+      const attempt = await op("record.patch", { ref: entry.key, set });
+      assert.equal(attempt.status, 400);
+      assert.match(JSON.stringify(attempt.body), /immutable/);
+    }
+  }
+  // Future/self references cannot create cycles; existing anchors cannot be changed to close a cycle.
+  assert.equal((await op("record.create", { kind: "entry", body: { title: "Forward cycle", about_id: "JNL-9999" } })).status, 400);
+  assert.equal((await op("record.create", { kind: "entry", body: { title: "Contradictory child", about_id: parent.key, project_id: b.key } })).status, 400);
+  assert.equal((await op("record.patch", { ref: parent.key, set: { title: "Content correction", detail: "Ordinary editing remains available" } })).status, 200);
+  assert.equal((await op("record.undo", { ref: parent.key })).status, 200, "content undo retains anchors");
+  await visible();
+
+  // Simulate an existing historical scope move and return, before anchors became immutable.
+  const current = (await op("record.get", { ref: parent.key })).body.result as Json;
+  const originalBody = current.body as Json;
+  for (const [i, body] of [{ ...originalBody, project_id: b.id, about_id: b.id }, originalBody].entries())
+    acme.run("insert into revisions(record_id,rev,body,archived,changed,op,actor,actor_kind,at) values (?,?,?,0,'[\"about_id\",\"project_id\"]','patch','historical-editor','person','2026-09-01')", String(parent.id), Number(current.rev) + i + 1, JSON.stringify(body));
+  acme.run("update records set rev=? where id=?", Number(current.rev) + 2, String(parent.id));
+  const beforeHistory = (await op("record.history", { ref: parent.key })).body.result;
+  const undo = await op("record.undo", { ref: parent.key });
+  assert.equal(undo.status, 400); assert.match(JSON.stringify(undo.body), /immutable/);
+  assert.deepEqual((await op("record.history", { ref: parent.key })).body.result, beforeHistory);
+  await visible();
+  assert.equal((await op("record.archive", { ref: parent.key })).status, 200);
+  assert.equal((await op("record.undo", { ref: parent.key })).status, 200, "archive undo restores without changing anchors");
+  await visible();
+  assert.equal((await op("record.archive", { ref: parent.key })).status, 200);
+  assert.equal((await op("record.restore", { ref: parent.key })).status, 200);
+  await visible();
+  const unscoped = await make("entry", { title: "Historical-compatible absent anchors" });
+  for (const set of [{ project_id: a.key }, { about_id: parent.key }])
+    assert.equal((await op("record.patch", { ref: unscoped.key, set })).status, 400, "absent anchors are immutable too");
+  assert.equal((await op("record.patch", { ref: parent.key, set: { project_id: a.key } })).status, 200, "same normalized anchor is a no-op");
+  await visible();
+  const correction = await make("entry", { title: "New attributed scope correction", about_id: b.key, detail: `Correction to ${String(parent.key)}` });
+  assert.equal(correction.updated_by, "hermes:acme");
+  assert.equal((correction.body as Json).project_id, b.id);
+  const originalContext = (await op("project.context", { ref: a.key })).body.result as Json;
+  assert.deepEqual(originalContext.scope_conflicts, []);
+  assert.deepEqual((originalContext.log as Json[]).map(e => (e.record as Json).id).sort(), anchored.map(e => e.id).sort());
+});

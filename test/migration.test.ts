@@ -690,6 +690,12 @@ test("legacy migration derives assertion history and flags contradictory Journal
   }
   assert.equal((run(co, admin, "record.get", { ref: "JNL-0004" }) as Rec).body.project_id, "project-b");
   assert.ok((run(co, admin, "journal.list", {}) as JournalItem[]).some(e => e.key === "JNL-0004"));
+  const legacyLinks = (run(co, admin, "record.get", { ref: "JNL-0004" }) as Rec).body;
+  const edited = run(co, admin, "record.patch", { ref: "JNL-0004", set: { title: "Legacy content correction" } }) as Rec;
+  assert.equal(edited.body.about_id, legacyLinks.about_id); assert.equal(edited.body.project_id, legacyLinks.project_id);
+  assert.throws(() => run(co, admin, "record.patch", { ref: "JNL-0004", set: { project_id: ID.project } }), /immutable/);
+  assert.equal(projectContext(co, ID.project).scope_conflicts[0]!.record.body.title, "Legacy content correction");
+
 });
 
 test("prior disposable schema 5 upgrades to distinct issue_note identity without changing old notes", (t) => {

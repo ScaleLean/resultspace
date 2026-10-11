@@ -2,7 +2,7 @@
 
 This repo-owned plugin exposes `rs_context` (project context, record context or search) and `rs_learn` (explicit sourced project learning). It adds the company brief at session start. Hermes owns its runtime and tools; ResultSpace holds company knowledge and provenance.
 
-Use the profile's existing ResultSpace CLI config: `server_url`, `default_company`, and a `key_file` under `[companies.<slug>]`. Keys must be mode 0600 and are never returned by the knowledge tools. No installed profiles are changed by this repo.
+Use the profile's existing ResultSpace CLI config: `server_url`, `default_company`, and a `key_file` under `[companies.<slug>]`. Keys must be mode 0600 and are never returned by the knowledge tools. Named profiles require their own `resultspace/profiles/<name>/cli.toml` under the config directory; missing files fail closed. `default` uses `resultspace/cli.toml`. An explicit `RS_CONFIG` overrides either path. No installed profiles are changed by this repo.
 
 ## Upgrade cutoff
 

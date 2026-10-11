@@ -94,9 +94,15 @@ test("links: reference fields and cited keys, both directions", (t) => {
     back.map((l) => [l.key, l.label, l.title]),
     [["JNL-0001", "project", "Label verified"]],
   );
-  // Links follow the body: remove the reference and the link goes.
-  rec(acme, member, "record.patch", { ref: "JNL-0001", set: { project_id: null } });
-  assert.equal((run(acme, member, "record.links", { ref: "PRJ-0001" }) as { in: Link[] }).in.length, 0);
+  assert.throws(() => rec(acme, member, "record.patch", { ref: "JNL-0001", set: { project_id: null } }), /immutable/);
+  // Ordinary Journal content edits still rebuild citations, while preserving its scope link.
+  rec(acme, member, "record.patch", { ref: "JNL-0001", set: { detail: "No longer cites the label" } });
+  assert.deepEqual((run(acme, member, "record.links", { ref: "JNL-0001" }) as { out: Link[] }).out.map(l => [l.key, l.label]), [["PRJ-0001", "project"]]);
+  // Editable knowledge references still add/remove links in both directions.
+  rec(acme, member, "record.patch", { ref: "KNW-0001", set: { project_id: "PRJ-0001" } });
+  assert.equal((run(acme, member, "record.links", { ref: "PRJ-0001" }) as { in: Link[] }).in.length, 2);
+  rec(acme, member, "record.patch", { ref: "KNW-0001", set: { project_id: null } });
+  assert.deepEqual((run(acme, member, "record.links", { ref: "PRJ-0001" }) as { in: Link[] }).in.map(l => l.key), ["JNL-0001"]);
 });
 
 test("search finds words anywhere in a record and skips archived records", (t) => {

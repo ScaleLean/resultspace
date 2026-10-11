@@ -139,3 +139,33 @@ class Knowledge(unittest.TestCase):
             learned = c.create_record('knowledge', {'title':'Identity check', 'source':'Disposable citation'})
             self.assertEqual(learned['updated_by'], identity)
             self.assertEqual(c.brief()['actor'], me['actor'])
+
+    def test_missing_named_profile_never_falls_back_to_default_identity(self):
+        base = self.path/'fail-closed-config'/'resultspace'
+        base.mkdir(parents=True)
+        def config(company):
+            return f'server_url = "{self.c.server_url}"\ndefault_company = "{company}"\n[companies.{company}]\nkey_file = "{self.path/(company+".key")}"\n'
+        default = base/'cli.toml'
+        default.write_text(config('acme'))
+        env = {'XDG_CONFIG_HOME': str(base.parent)}
+        expected = base/'profiles'/'missing-named'/'cli.toml'
+        self.assertEqual(rsclient.config_path('missing-named', env), expected)
+        with self.assertRaisesRegex(rsclient.RsError, "no ResultSpace config for profile 'missing-named'"):
+            rsclient.Client.for_profile('missing-named', env=env)
+        # Default deliberately uses base, even if profiles/default contains another identity.
+        default_profile = base/'profiles'/'default'
+        default_profile.mkdir(parents=True)
+        (default_profile/'cli.toml').write_text(config('other'))
+        me = rsclient.Client.for_profile('default', env=env).me()
+        self.assertEqual(me['company']['slug'], 'acme')
+        self.assertEqual(me['actor'], {'kind':'agent', 'name':'hermes', 'role':'member'})
+        explicit = self.path/'explicit-profile-override.toml'
+        explicit.write_text(config('other'))
+        client = rsclient.Client.for_profile('missing-named', env={**env, 'RS_CONFIG': str(explicit)})
+        me = client.me()
+        self.assertEqual(me['company']['slug'], 'other')
+        self.assertEqual(me['actor'], {'kind':'agent', 'name':'other-hermes', 'role':'member'})
+        recorded = client.create_record('knowledge', {'title':'Explicit identity', 'source':'Disposable citation'})
+        history = client.op('record.history', {'ref':recorded['key']})
+        self.assertEqual(recorded['updated_by'], 'other-hermes')
+        self.assertEqual(history[0]['actor'], me['actor']['name'])
