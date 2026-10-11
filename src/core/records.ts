@@ -203,18 +203,51 @@ export function links(co: Company, ref: string): { out: Link[]; in: Link[] } {
   return { out: q("from_id", "to_id"), in: q("to_id", "from_id") };
 }
 
-/** A Journal belongs to one project. About/citations do not grant additional project membership. */
-export function projectScope(co: Company, r: Pick<Rec, "kind" | "body">) {
+/** Bound historical scope resolution, including validation behind explicit anchors. */
+export const JOURNAL_SCOPE_MAX_RECORDS = 64;
+
+/** A Journal has one project across its entire about chain; reads never rewrite historical anchors. */
+export function projectScope(co: Company, r: Pick<Rec, "kind" | "body"> & { id?: string }) {
+  const cache = new Map<string, Rec | undefined>();
+  const lookup = (ref: unknown) => {
+    if (typeof ref !== "string" || !ref) return undefined;
+    if (!cache.has(ref)) cache.set(ref, get(co, ref));
+    return cache.get(ref);
+  };
   const project = (ref: unknown) => {
-    const target = typeof ref === "string" ? get(co, ref) : undefined;
+    const target = lookup(ref);
     return target?.kind === "project" ? target.id : null;
   };
   const declared = project(r.body.project_id);
-  const about = r.kind === "entry" && typeof r.body.about_id === "string" ? get(co, r.body.about_id) : undefined;
-  const inherited = about?.kind === "project" ? about.id : project(about?.body.project_id);
-  const problem = r.body.project_id && !declared ? "Unknown historical project reference" :
-    declared && inherited && declared !== inherited ? "Conflicting historical about/project references" : null;
-  return { project_id: problem ? null : declared ?? inherited, declared, inherited, problem };
+  let inherited: string | null = null;
+  let canonical: string | null = null;
+  let problem: string | null = null;
+  const projects = new Set<string>();
+  const seen = new Set(r.id ? [r.id] : []);
+  let node = r;
+  for (let depth = 0; depth < JOURNAL_SCOPE_MAX_RECORDS; depth++) {
+    const anchor = depth > 0 && node.kind === "project" ? node.id! : project(node.body.project_id);
+    if (anchor) {
+      projects.add(anchor);
+      if (depth > 0 && !inherited) inherited = anchor;
+      if (canonical && canonical !== anchor) problem = "Conflicting historical about/project references";
+      canonical ??= anchor;
+    } else if (node.body.project_id != null) {
+      problem ??= "Unknown historical project reference";
+    }
+    // Continue past explicit anchors to detect conflicting ancestors and cycles.
+    if (node.kind !== "entry" || node.body.about_id == null) break;
+    if (depth + 1 === JOURNAL_SCOPE_MAX_RECORDS) {
+      problem ??= `Journal about chain exceeds ${JOURNAL_SCOPE_MAX_RECORDS} records`;
+      break;
+    }
+    const about = lookup(node.body.about_id);
+    if (!about) { problem ??= "Unknown historical about reference"; break; }
+    if (seen.has(about.id)) { problem ??= "Cycle in historical Journal about chain"; break; }
+    seen.add(about.id);
+    node = about;
+  }
+  return { project_id: problem ? null : canonical, declared, inherited, problem, projects: [...projects] };
 }
 
 /** Current assertion, original record and last edit are distinct facts in append-only history. */
@@ -372,7 +405,7 @@ function checked(co: Company, kind: KindDef, body: Body, prev: Body | null): Bod
           throw invalid(`Journal ${field} is immutable after creation; append a new attributed correction entry`);
     } else {
       const scope = projectScope(co, { kind: "entry", body: out });
-      if (scope.problem) throw invalid("Journal about/project references must identify the same project");
+      if (scope.problem) throw invalid(`Cannot resolve Journal project scope: ${scope.problem}`);
       if (!out.project_id && scope.inherited) {
         const project = need(co, scope.inherited);
         if (project.archived || isLegacy(co, project.id)) throw invalid("Journal project is archived or legacy");

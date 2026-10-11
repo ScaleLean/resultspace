@@ -236,3 +236,66 @@ test("Journal scope anchors stay immutable for parent, child and transitive chil
   assert.deepEqual(originalContext.scope_conflicts, []);
   assert.deepEqual((originalContext.log as Json[]).map(e => (e.record as Json).id).sort(), anchored.map(e => e.id).sort());
 });
+
+test("historical null-project Journal chains anchor new descendants transitively without rewriting legacy rows", async (t) => {
+  const { acme, keys, call } = await serve(t);
+  const { uuidv7 } = await import("../src/core/records.ts");
+  const op = (name: string, input: Json) => call(keys.acme, "POST", `/v1/op/${name}`, input);
+  const make = async (kind: string, body: Json) => {
+    const response = await op("record.create", { kind, body });
+    assert.equal(response.status, 200);
+    return response.body.result as Json;
+  };
+  const a = await make("project", { title: "Historical project A" });
+  const b = await make("project", { title: "Other project B" });
+  const legacy = (key: string, about: unknown) => {
+    const id = uuidv7(), body = JSON.stringify({ title: key, type: "note", about_id: about, project_id: null });
+    acme.run("insert into records values (?,?,'entry',1,?,0,'2026-09-01','2026-09-01','legacy-author')", id, key, body);
+    acme.run("insert into revisions(record_id,rev,body,archived,changed,op,actor,actor_kind,at) values (?,1,?,0,'[]','import','legacy-author','person','2026-09-01')", id, body);
+    acme.run("insert into links values (?,?,'about')", id, String(about));
+    return { id, key };
+  };
+  const parent = legacy("JNL-0901", a.id);
+  const legacyChild = legacy("JNL-0902", parent.id);
+  const legacyGrandchild = legacy("JNL-0903", legacyChild.id);
+  const snapshot = async () => Promise.all([parent, legacyChild, legacyGrandchild].map(async entry => [
+    (await op("record.get", { ref: entry.key })).body.result,
+    (await op("record.history", { ref: entry.key })).body.result,
+    ((await op("record.links", { ref: entry.key })).body.result as Json).out,
+  ]));
+  const parentBody = (await op("record.get", { ref: parent.key })).body.result as Json;
+  for (const [i, body] of [{ ...(parentBody.body as Json), project_id: a.id }, parentBody.body].entries())
+    acme.run("insert into revisions(record_id,rev,body,archived,changed,op,actor,actor_kind,at) values (?,?,?,0,'[\"project_id\"]','patch','historical-editor','person','2026-09-02')", parent.id, i + 2, JSON.stringify(body));
+  acme.run("update records set rev=3,updated_by='historical-editor',updated_at='2026-09-02' where id=?", parent.id);
+  const before = await snapshot();
+  const scopeUndo = await op("record.undo", { ref: parent.key });
+  assert.equal(scopeUndo.status, 400); assert.match(JSON.stringify(scopeUndo.body), /immutable/);
+  const child = await make("entry", { title: "New child", about_id: parent.key });
+  const grandchild = (await op("journal.log", { title: "New grandchild", about: child.key })).body.result as Json;
+  assert.equal((grandchild.body as Json).project_id, a.id);
+  const deeper = await make("entry", { title: "Child of unanchored historical grandchild", about_id: legacyGrandchild.key });
+  for (const entry of [child, deeper]) assert.equal((entry.body as Json).project_id, a.id);
+  const all = [parent, legacyChild, legacyGrandchild, child, grandchild, deeper];
+  const visible = async () => {
+    const context = (await op("project.context", { ref: a.key })).body.result as Json;
+    assert.deepEqual((context.log as Json[]).map(e => (e.record as Json).id).sort(), all.map(e => e.id).sort());
+    assert.deepEqual(context.scope_conflicts, []);
+    const log = (await op("journal.list", { project: a.key })).body.result as Json[];
+    assert.deepEqual(log.map(e => e.key).sort(), all.map(e => e.key).sort());
+    assert.deepEqual((await op("journal.list", { project: b.key })).body.result, []);
+    assert.deepEqual(((await op("project.context", { ref: b.key })).body.result as Json).log, []);
+  };
+  await visible();
+  for (const entry of [parent, legacyChild, legacyGrandchild]) {
+    assert.equal((await op("record.create", { kind: "entry", body: { title: "Conflicting explicit project", about_id: entry.key, project_id: b.key } })).status, 400);
+    assert.equal((await op("journal.log", { title: "Conflicting logged project", about: entry.key, project: b.key })).status, 400);
+    assert.equal((await op("record.patch", { ref: entry.key, set: { project_id: a.key } })).status, 400, "legacy null anchors stay immutable");
+  }
+  assert.deepEqual(await snapshot(), before, "historical bodies, keys, links and history are not rewritten");
+  for (const entry of [child, grandchild, deeper]) {
+    assert.equal((await op("record.patch", { ref: entry.key, set: { project_id: b.key, about_id: b.key } })).status, 400);
+    assert.equal((await op("record.patch", { ref: entry.key, set: { title: "Editable content" } })).status, 200);
+    assert.equal((await op("record.undo", { ref: entry.key })).status, 200);
+  }
+  await visible();
+});

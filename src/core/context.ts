@@ -38,7 +38,7 @@ export function projectContext(co: Company, ref: string, limit = 100) {
   ].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.key.localeCompare(b.key));
   const scopeConflicts = journal.filter((r) => {
     const scope = records.projectScope(co, r);
-    return scope.problem && [scope.declared, scope.inherited].includes(project.id);
+    return scope.problem && scope.projects.includes(project.id);
   });
   // Inventory includes citations on relevant claims even when the source has no project link.
   const sourceIds = new Set(relevant.filter((r) => r.kind === "source").map((r) => r.id));
