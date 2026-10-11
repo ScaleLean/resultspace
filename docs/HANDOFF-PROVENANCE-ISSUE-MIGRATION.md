@@ -1,5 +1,17 @@
 # Provenance and legacy issue migration handoff
 
+## Latest review follow-up: immutable Journal anchors and client identity
+
+Implementation **b3adbca075f2f2816cab173a7ccd741950f07c4d**, based on **452e4a12cefd92ecfe9cf78cb3f85953915bf0da**. This supersedes the older instructions below about repairing Journal scope through link edits: `project_id` and `about_id` are immutable after creation, including absent/historical values. Corrections append a new attributed entry. Core patch validation also covers undo; archive/restore preserves bodies. No migration/version bump: schema remains 6. Ordinary content/citation edits and historical readback remain available.
+
+Disposable authenticated HTTP regression covers parent/child/transitive child; rejected moves, deletions and attempted cycles; contradictory/forward-parent creation; content edit/undo; rejected undo of a historical scope revision; archive undo and restore; and visibility in original project context/Log throughout. Existing migration regression confirms conflicting historical anchors remain unchanged while content editing succeeds. Retained links test still checks citation rebuilding and mutable knowledge references while explicitly rejecting Journal scope removal.
+
+Named Hermes profiles now select only their own config path and fail closed when absent; `default` uses base config, even if a profiles/default config exists. `RS_CONFIG` explicitly overrides either. A regression places a valid default config beside a missing named profile and verifies rejection; exact actor/company readback and recorded revision identity are checked for default and explicit override. No installed configs/profiles were edited.
+
+Final verification on this implementation: `npm run build` passed; `npm test` **53 passed, 0 failed, 0 skipped**, using the rebuilt web handler; `npm run check:web` **0 errors, 0 warnings**; `python3 -m unittest discover -s integrations/hermes-plugin/tests -v` **6 passed**; `git diff --check` passed. Runtime and tests are committed together. Nine files changed, 140 lines added/16 deleted; no files or retained tests removed. [Exact file manifest](CHANGED-FILES-PROVENANCE-ISSUE-MIGRATION.txt) includes this follow-up.
+
+Release remains blocked pending independent review and actual eight-company disposable backup/restore/client/rollback gates. No live or sensitive copy reads, installed-client changes, push, merge or deployment. Prior implementation/handoff details below are historical.
+
 Implementation: **ac9a74ea6885ee272a3d2ef7027a33af93f8fc4c**, based on **c4682ab696cd470c4a3258aa707d8e24b31a763d**, in the existing isolated knowledge-first worktree. [Exact changed files](CHANGED-FILES-PROVENANCE-ISSUE-MIGRATION.txt). No main/remote/live-data/installed-profile changes, deployment or merge. No sensitive backup contents were opened. Tests use synthetic disposable company directories.
 
 | Before | After |
