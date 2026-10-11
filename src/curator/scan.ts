@@ -14,7 +14,7 @@ export function upkeepFindings(co: Company, max = 100): Finding[] {
   const live = co
     .all<{ id: string }>(
       `select id from records where archived = 0 and id not in (select record_id from legacy_records)
-    and kind in ('fact','knowledge','project','issue') order by key`,
+    and (kind in ('fact','knowledge','project','issue') or (kind = 'entry' and json_extract(body, '$.type') = 'learning')) order by key`,
     )
     .map((x) => records.need(co, x.id));
   const out: Finding[] = [];
@@ -37,15 +37,8 @@ export function upkeepFindings(co: Company, max = 100): Finding[] {
       const group = records.stable([norm(r.body.subject), norm(r.body.predicate), norm(r.body.scope), norm(r.body.unit)]);
       groups.set(group, [...(groups.get(group) ?? []), r]);
     }
-    if (["fact", "knowledge"].includes(r.kind)) {
-      const sourced =
-        (typeof r.body.source === "string" && r.body.source.trim()) ||
-        (typeof r.body.url === "string" && r.body.url.trim()) ||
-        (Array.isArray(r.body.source_ids) &&
-          r.body.source_ids.some((id) => {
-            const source = typeof id === "string" ? records.get(co, id) : undefined;
-            return source && !source.archived && !records.isLegacy(co, source.id);
-          }));
+    if (["fact", "knowledge"].includes(r.kind) || (r.kind === "entry" && r.body.type === "learning")) {
+      const sourced = records.hasCurrentSource(co, r.body) || (r.kind !== "entry" && typeof r.body.url === "string" && r.body.url.trim());
       if (!sourced) add("unsupported", [r], "No current source is cited. Review this claim before relying on it.");
       const date = typeof r.body.observed_at === "string" ? r.body.observed_at : r.updated_at;
       if (Date.parse(date) < Date.now() - 90 * 86400000) add("stale", [r], `Last observation or update ${date}; confirm it still holds.`);

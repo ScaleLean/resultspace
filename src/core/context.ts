@@ -38,6 +38,16 @@ export function projectContext(co: Company, ref: string, limit = 100) {
     project.id,
   );
   const relevant = ids.map((x) => records.need(co, x.id));
+  // Inventory includes citations on relevant claims even when the source has no project link.
+  const sourceIds = new Set(relevant.filter((r) => r.kind === "source").map((r) => r.id));
+  for (const r of [project, ...relevant]) {
+    for (const source of evidence(co, r).sources) {
+      if (source.kind === "source" && !source.archived && !records.isLegacy(co, source.id)) sourceIds.add(source.id);
+    }
+  }
+  const sources = [...sourceIds]
+    .map((id) => records.need(co, id))
+    .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.key.localeCompare(b.key));
   const section = (kind: string) =>
     relevant
       .filter((r) => r.kind === kind)
@@ -66,10 +76,11 @@ export function projectContext(co: Company, ref: string, limit = 100) {
     log: section("entry"),
     issues: section("issue"),
     decisions: section("decision"),
-    sources: section("source"),
+    sources: sources.slice(-limit).map((r) => evidence(co, r)),
     findings: findings.slice(-limit).map((r) => evidence(co, r)),
     truncated:
       findings.length > limit ||
+      sources.length > limit ||
       ["fact", "knowledge", "entry", "issue", "decision", "source"].some(
         (k) => relevant.filter((r) => r.kind === k).length > limit,
       ),

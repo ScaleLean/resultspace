@@ -85,3 +85,51 @@ test("mcp: the operation list as tools, with the key's rights", async (t) => {
   assert.equal(((await rpc(keys.acme, 5, "nope")).body.error as Json).code, -32601);
   assert.equal((await call(null, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" })).status, 401);
 });
+
+test("log and project context credit a second authenticated editor while preserving the original assertion", async (t) => {
+  const { acme, keys, call } = await serve(t);
+  addAgent(acme, "editor", "member");
+  const editorKey = issueKey(acme, "editor");
+  const project = (await call(keys.acme, "POST", "/v1/op/record.create", { kind: "project", body: { title: "Launch" } })).body
+    .result as Json;
+  const original = (
+    await call(keys.acme, "POST", "/v1/op/journal.log", {
+      title: "Launch succeeded",
+      type: "outcome",
+      detail: "Supplier confirmed",
+      project: project.key,
+    })
+  ).body.result as Json;
+  const edited = await call(editorKey, "POST", "/v1/op/record.patch", {
+    ref: original.key,
+    set: { title: "Launch uncertain", type: "note", detail: "Supplier withdrew confirmation" },
+    why: "New supplier email",
+  });
+  assert.equal(edited.status, 200);
+  const log = (await call(keys.acme, "POST", "/v1/op/journal.list", { project: project.key })).body.result as Json[];
+  assert.equal(log[0]!.by, "editor");
+  assert.equal(log[0]!.type, "note");
+  assert.equal(log[0]!.title, "Launch uncertain");
+  assert.equal(log[0]!.detail, "Supplier withdrew confirmation");
+  assert.equal((log[0]!.original as Json).actor, "hermes:acme");
+  assert.equal(((log[0]!.original as Json).body as Json).title, "Launch succeeded");
+  assert.equal(((log[0]!.original as Json).body as Json).type, "outcome");
+  const context = (await call(keys.acme, "POST", "/v1/op/project.context", { ref: project.key })).body.result as Json;
+  const entry = (context.log as Json[])[0]!;
+  assert.equal((entry.provenance as Json).actor, "editor");
+  assert.equal((entry.provenance as Json).at, log[0]!.updated_at);
+  assert.equal(((entry.record as Json).body as Json).title, log[0]!.title);
+  const history = (await call(keys.acme, "POST", "/v1/op/record.history", { ref: original.key })).body.result as Json[];
+  assert.deepEqual(
+    history.map((r) => r.actor),
+    ["hermes:acme", "editor"],
+  );
+  assert.equal((history[0]!.body as Json).detail, "Supplier confirmed");
+  for (const input of [
+    { title: "Uncited learning", type: "learning" },
+    { title: "Whitespace citation", type: "learning", source: "  " },
+  ])
+    assert.equal((await call(keys.acme, "POST", "/v1/op/journal.log", input)).status, 400);
+  assert.equal((await call(editorKey, "POST", "/v1/op/record.patch", { ref: original.key, set: { type: "learning" } })).status, 400,
+    "generic patch cannot turn an unsourced note into learning");
+});

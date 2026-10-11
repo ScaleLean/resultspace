@@ -23,7 +23,7 @@
   {#if data.project}<h2>Focused project context</h2>
     <p>{data.project.scope}</p>
     {#if data.project.truncated}<p class="notice">Some context is omitted. Read the linked records for more.</p>{/if}
-    {#each [["facts", data.project.facts], ["knowledge", data.project.knowledge], ["issues", data.project.issues], ["log", data.project.log], ["findings", data.project.findings]] as [label, items]}<h2
+    {#each [["facts", data.project.facts], ["knowledge", data.project.knowledge], ["sources", data.project.sources], ["issues", data.project.issues], ["log", data.project.log], ["findings", data.project.findings]] as [label, items]}<h2
       >
         {label === "log" ? "Chronological log" : label}
       </h2>

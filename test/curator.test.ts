@@ -5,7 +5,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { addAgent } from "../src/core/agents.ts";
 import type { Rec, Revision } from "../src/core/records.ts";
 import { Curator } from "../src/curator/curator.ts";
-import { saveSettings } from "../src/curator/settings.ts";
+import { getMeta, saveSettings } from "../src/curator/settings.ts";
 import { run } from "../src/operations/index.ts";
 import { admin, member, rec, setup } from "./helpers.ts";
 
@@ -62,4 +62,58 @@ test("curator briefing, chat, spending limit, and the scheduler", async (t) => {
   const refused = await c.say("One more thing");
   assert.equal(refused.ok, false);
   assert.match(refused.ok ? "" : refused.error, /spending limit/);
+});
+
+test("initial model accuracy review is bounded, checkpointed across restart, and respects the spending gate", async (t) => {
+  const { dir, companies, acme } = setup(t);
+  const claims = Array.from({ length: 23 }, (_, i) =>
+    rec(acme, { ...member, name: "import" }, "record.create", {
+      kind: i % 2 ? "fact" : "knowledge",
+      body: i % 2
+        ? { title: `Existing fact ${i}`, subject: "Supplier", predicate: `quote_${i}`, value_type: "number", value: i, source: "Supplier email" }
+        : { title: `Existing knowledge ${i}`, body: "Check accuracy against the citation", source: "Supplier email" },
+    }),
+  );
+  // Existing installations may already have skipped these claims with the old first-run cursor.
+  acme.run("insert into meta values ('curator.review_seq', ?)", String(acme.one<{ n: number }>("select max(seq) as n from revisions")!.n));
+  const faux = fauxProvider();
+  const prompts: string[] = [];
+  faux.setResponses(
+    Array.from(
+      { length: 10 },
+      () =>
+        ((context: { messages: { role: string; content: unknown }[] }) => {
+          prompts.push(JSON.stringify(context.messages.filter((m) => m.role === "user")));
+          return fauxAssistantMessage("Reviewed source accuracy; no supported correction.");
+        }) as Parameters<typeof faux.setResponses>[0][number],
+    ),
+  );
+  let curator = new Curator(companies, { dataDir: dir, faux });
+  let c = await curator.for("acme");
+  saveSettings(acme, { daily_cap_usd: 0.000001 });
+  acme.run("insert into meta values (?, ?)", `curator.spend_base.${new Date().toISOString().slice(0, 10)}`, "-1");
+  assert.equal((await c.review())!.status, "skipped");
+  assert.equal(getMeta(acme, "curator.baseline_seq"), "0");
+  assert.equal(prompts.length, 0, "no model call beyond the spending gate");
+  saveSettings(acme, { daily_cap_usd: 0 });
+  assert.equal((await c.review())!.duty, "initial-review");
+  assert.equal(prompts[0]!.match(/rev 1 by import/g)!.length, 20);
+  assert.ok(prompts[0]!.includes(claims[0]!.key));
+  assert.ok(!prompts[0]!.includes(claims[20]!.key));
+  const checkpoint = getMeta(acme, "curator.baseline_seq");
+  const later = rec(acme, member, "record.create", { kind: "knowledge", body: { title: "Later claim", source: "Later email" } });
+  await curator.close();
+  curator = new Curator(companies, { dataDir: dir, faux });
+  t.after(() => curator.close());
+  c = await curator.for("acme");
+  assert.equal(getMeta(acme, "curator.baseline_seq"), checkpoint);
+  assert.equal((await c.review())!.duty, "initial-review");
+  assert.equal(prompts[1]!.match(/rev 1 by import/g)!.length, 3);
+  assert.ok(prompts[1]!.includes(claims[20]!.key));
+  assert.ok(!prompts[1]!.includes(later.key));
+  assert.equal((await c.review())!.duty, "review", "new writes after the high-water mark use normal incremental review");
+  assert.ok(prompts[2]!.includes(later.key));
+  assert.equal(getMeta(acme, "curator.baseline_seq"), getMeta(acme, "curator.baseline_end"));
+  assert.equal(await c.review(), null);
+  assert.equal(prompts.length, 3, "completed baseline does not repeatedly spend on old claims");
 });

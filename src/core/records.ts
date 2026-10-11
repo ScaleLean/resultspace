@@ -207,6 +207,17 @@ export function links(co: Company, ref: string): { out: Link[]; in: Link[] } {
 
 export const isLegacy = (co: Company, ref: string): boolean =>
   !!co.one("select 1 from legacy_records where record_id = ?", need(co, ref).id);
+/** A citation is author-provided evidence, never independent verification. */
+export function hasCurrentSource(co: Company, body: Body): boolean {
+  return (
+    !!(typeof body.source === "string" && body.source.trim()) ||
+    (Array.isArray(body.source_ids) &&
+      body.source_ids.some((id) => {
+        const source = typeof id === "string" ? get(co, id) : undefined;
+        return source?.kind === "source" && !source.archived && !isLegacy(co, source.id);
+      }))
+  );
+}
 function writable(co: Company, who: Who, r?: Rec): void {
   if (who.role === "viewer") throw forbidden("writing needs the member role");
   if (who.kind === "curator" && r) throw forbidden("Curator never edits claims or existing records");
@@ -247,6 +258,8 @@ function checked(co: Company, kind: KindDef, body: Body, prev: Body | null): Bod
   }
   if (kind.kind === "entry" && touched("type") && body.type !== undefined && !ENTRY_TYPES.includes(body.type as EntryType))
     throw invalid("log type must be outcome, learning or note");
+  if (kind.kind === "entry" && body.type === "learning" && !hasCurrentSource(co, body))
+    throw invalid("Learning needs a source citation or current source_ids; citations are not independent verification");
   if (kind.kind === "project") {
     for (const field of ["goal", "current_state"])
       if (touched(field) && body[field] !== undefined && typeof body[field] !== "string") throw invalid(`${field} must be text`);

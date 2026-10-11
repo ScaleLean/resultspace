@@ -24,8 +24,12 @@ class Knowledge(unittest.TestCase):
             subprocess.run(['node', 'src/admin.ts', *args], cwd=ROOT, env=cls.env, check=True, capture_output=True)
         for company in ['acme','other']:
             admin('company','create',company,company)
-            admin('agent','add',company,'hermes','member')
-            admin('agent','key',company,'hermes','--out',str(cls.path / (company+'.key')))
+            admin('agent','add',company,'hermes' if company == 'acme' else 'other-hermes','member')
+            admin('agent','key',company,'hermes' if company == 'acme' else 'other-hermes','--out',str(cls.path / (company+'.key')))
+        admin('agent','add','acme','key-reviewer','admin')
+        admin('agent','key','acme','key-reviewer','--out',str(cls.path/'admin.key'))
+        admin('agent','add','acme','revocation-test','member')
+        admin('agent','key','acme','revocation-test','--out',str(cls.path/'revoked.key'))
         with socket.socket() as sock:
             sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
         cls.env.update(PORT=str(port),HOST='127.0.0.1')
@@ -73,3 +77,65 @@ class Knowledge(unittest.TestCase):
         cfg=self.path/'cli.toml';cfg.write_text('server_url = "'+self.c.server_url+'"\ndefault_company = "acme"\n[companies.acme]\nkey_file = "'+str(self.path/'acme.key')+'"\n')
         configured=rsclient.Client.for_profile('disposable',env={'RS_CONFIG':str(cfg)})
         self.assertEqual(configured.me()['company']['slug'],'acme')
+
+
+    def test_missing_wrong_revoked_keys_and_unreachable_server(self):
+        cases = [({}, "no key_file configured"), ({'acme': self.path/'absent.key'}, "cannot read key file")]
+        empty = self.path/'empty.key'; empty.write_text(''); empty.chmod(0o600)
+        cases.append(({'acme': empty}, "empty"))
+        for keys, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(rsclient.RsError, message) as failure:
+                    rsclient.Client(self.c.server_url, keys, 'acme').me()
+                self.assertEqual(failure.exception.status, 0)
+        wrong = self.path/'wrong.key'; wrong.write_text('invalid-disposable-key'); wrong.chmod(0o600)
+        with self.assertRaises(rsclient.RsError) as failure:
+            rsclient.Client(self.c.server_url, {'acme': wrong}, 'acme').me()
+        self.assertEqual(failure.exception.status, 401)
+        victim = rsclient.Client(self.c.server_url, {'acme': self.path/'revoked.key'}, 'acme')
+        self.assertEqual(victim.me()['actor']['name'], 'revocation-test')
+        admin = rsclient.Client(self.c.server_url, {'acme': self.path/'admin.key'}, 'acme')
+        admin.op('agent.revoke', {'name': 'revocation-test'})
+        with self.assertRaises(rsclient.RsError) as failure: victim.me(refresh=True)
+        self.assertEqual(failure.exception.status, 401)
+        with self.assertRaises(rsclient.RsError) as failure: victim.project_context('PRJ-0001')
+        self.assertEqual(failure.exception.status, 401)
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            unreachable = rsclient.Client('http://127.0.0.1:'+str(sock.getsockname()[1]), self.c.key_files, 'acme', timeout=.2)
+            with self.assertRaisesRegex(rsclient.RsError, 'unreachable') as failure: unreachable.me()
+            self.assertEqual(failure.exception.status, 0)
+
+    def test_profile_failures_and_exact_authenticated_identity(self):
+        cfg = self.path/'invalid-profile.toml'
+        with self.assertRaisesRegex(rsclient.RsError, 'missing'):
+            rsclient.Client.for_profile('missing', env={'RS_CONFIG':str(cfg)})
+        for text, message in [
+            ('broken = [', 'unreadable'),
+            ('[companies.acme]\nkey_file="anything"', 'server_url'),
+            ('server_url=42', 'server_url'),
+            ('server_url="http://["', 'HTTP'),
+            ('server_url="http://localhost"', 'key_file entries'),
+            ('server_url="http://localhost"\n[companies.acme]\nkey_file=42', 'nonempty path'),
+            ('server_url="http://localhost"\ndefault_company="wrong"\n[companies.acme]\nkey_file="anything"', 'default_company'),
+        ]:
+            cfg.write_text(text)
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(rsclient.RsError, message):
+                    rsclient.Client.for_profile('broken', env={'RS_CONFIG':str(cfg)})
+        base = self.path/'config'/'resultspace'
+        base.mkdir(parents=True)
+        def config(company):
+            return f'server_url = "{self.c.server_url}"\ndefault_company = "{company}"\n[companies.{company}]\nkey_file = "{self.path/(company+".key")}"\n'
+        (base/'cli.toml').write_text(config('acme'))
+        named = base/'profiles'/'supplier-research'; named.mkdir(parents=True)
+        (named/'cli.toml').write_text(config('other'))
+        env = {'XDG_CONFIG_HOME':str(self.path/'config')}
+        for profile, company, identity in [('default','acme','hermes'), ('supplier-research','other','other-hermes')]:
+            c = rsclient.Client.for_profile(profile, env=env)
+            me = c.me()
+            self.assertEqual(me['company'], {'slug':company, 'name':company})
+            self.assertEqual(me['actor'], {'kind':'agent', 'name':identity, 'role':'member'})
+            learned = c.create_record('knowledge', {'title':'Identity check', 'source':'Disposable citation'})
+            self.assertEqual(learned['updated_by'], identity)
+            self.assertEqual(c.brief()['actor'], me['actor'])

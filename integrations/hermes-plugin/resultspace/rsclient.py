@@ -73,13 +73,27 @@ class Client:
         except Exception as e:  # malformed config
             raise RsError(0, f"unreadable ResultSpace config {path}: {e}")
         url = server_override or cfg.get("server_url")
-        cos = cfg.get("companies") if isinstance(cfg.get("companies"), dict) else {}
-        keys = {s: v["key_file"] for s, v in cos.items() if isinstance(v, dict) and v.get("key_file")}
-        if not url:
-            raise RsError(0, f"{path}: server_url is missing")
-        if not keys:
+        if not isinstance(url, str) or not url.strip():
+            raise RsError(0, f"{path}: server_url is missing or must be text")
+        try:
+            parsed = urllib.parse.urlsplit(url)
+        except ValueError:
+            raise RsError(0, f"{path}: server_url must be an HTTP(S) URL")
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise RsError(0, f"{path}: server_url must be an HTTP(S) URL")
+        cos = cfg.get("companies")
+        if not isinstance(cos, dict) or not cos:
             raise RsError(0, f"{path}: no [companies.<slug>] key_file entries")
-        return cls(url, keys, cfg.get("default_company"))
+        keys = {}
+        for slug, entry in cos.items():
+            key = entry.get("key_file") if isinstance(entry, dict) else None
+            if not isinstance(key, str) or not key.strip():
+                raise RsError(0, f"{path}: companies.{slug}.key_file must be a nonempty path")
+            keys[slug] = key
+        default = cfg.get("default_company")
+        if default is not None and (not isinstance(default, str) or default not in keys):
+            raise RsError(0, f"{path}: default_company must name a configured company")
+        return cls(url, keys, default)
 
     # ------------------------------------------------------------------ company and key
 

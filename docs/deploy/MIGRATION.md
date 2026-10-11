@@ -35,3 +35,5 @@ The automated tests rehearse migration, preserved rows, complete directory backu
 Server 0.4.0 removes assignment/work, permission/action, presence/receipt, approval and skill-repository operations. There are no inert success responses or compatibility task handlers. Retired calls return not-found, with an upgrade explanation for retired operation families. Upgrade to focused context and explicit sourced record writes, and use plugin 0.15.0. Retired web views return 404; archived keys open through `/c/<slug>/r/<key>`.
 
 Installed Hermes profiles and skills have not been changed. If an installed profile still uses the retired `resultspace-memory` provider, replace it with a supported runtime memory provider during the reviewed upgrade. Long-term skill ownership remains undecided.
+
+The reported installed default plugin is 0.14.0, and the default plus seven named configurations use the retired memory provider. Follow the [coordinated installed-client migration plan](INSTALLED-CLIENT-MIGRATION.md); all eight disposable client/provider smoke tests are required before a future coordinated cutover. This plan has not changed installed profiles.

@@ -14,14 +14,14 @@ import type { Companies } from "../core/companies.ts";
 import type { Company } from "../core/company.ts";
 import { RsError } from "../core/errors.ts";
 import { reviewEvidence } from "../operations/curator.ts";
-import { changes } from "../core/records.ts";
+import { changes, history } from "../core/records.ts";
 import { operations, run } from "../operations/index.ts";
 import { briefingPrompt, reviewPrompt, systemPrompt, upkeepPrompt } from "./prompts.ts";
 import { upkeepFindings } from "./scan.ts";
 import { getMeta, getSettings, setMeta, type CuratorSettings } from "./settings.ts";
 
 export const CURATOR: Actor = { kind: "curator", name: "curator", role: "member" };
-// Tools the Curator gets: every read, and the three writes its rules allow. Never keys, never attachments' bytes.
+// Tools the Curator gets: every read, and the two writes its rules allow. Never keys, never attachments' bytes.
 const WRITE_TOOLS = new Set(["curator.flag", "curator.briefing"]);
 const HIDDEN = new Set(["agent.key", "blob.get", "changes.since"]);
 const toolName = (op: string) => op.replace(/\./g, "_");
@@ -201,12 +201,43 @@ class CompanyCurator {
 
   /** Review what agents and people wrote since the last review. Returns null when there is nothing new. */
   async review(): Promise<RunReport | null> {
-    const since = Number(getMeta(this.company, "curator.review_seq") ?? "-1");
-    const last = this.company.one<{ n: number | null }>("select max(seq) as n from revisions")?.n ?? 0;
-    if (since < 0) {
-      setMeta(this.company, "curator.review_seq", String(last));
-      return null;
-    } // first run: start from now, not from history
+    // A fixed high-water mark plus a persisted cursor bounds the initial accuracy pass.
+    // One batch per call, through the same daily spending gate; failures/skips do not advance it.
+    if (getMeta(this.company, "curator.baseline_end") === undefined) {
+      this.company.tx(() => {
+        const end = this.company.one<{ n: number | null }>("select max(seq) as n from revisions")?.n ?? 0;
+        setMeta(this.company, "curator.baseline_end", String(end));
+        setMeta(this.company, "curator.baseline_seq", "0");
+        if (getMeta(this.company, "curator.review_seq") === undefined) setMeta(this.company, "curator.review_seq", String(end));
+      });
+    }
+    const end = Number(getMeta(this.company, "curator.baseline_end"));
+    const cursor = Number(getMeta(this.company, "curator.baseline_seq"));
+    if (cursor < end) {
+      const batch = this.company
+        .all<{ id: string }>(
+          `select r.id from records r join revisions v on v.record_id = r.id and v.rev = r.rev
+         where r.kind in ('fact','knowledge') and r.archived = 0
+           and r.id not in (select record_id from legacy_records) and v.seq > ? and v.seq <= ?
+         order by v.seq limit 20`,
+          cursor,
+          end,
+        )
+        .map(({ id }) => history(this.company, id).at(-1)!);
+      if (batch.length) {
+        reviewEvidence(this.company);
+        const report = await this.duty(
+          "initial-review",
+          "Initial accuracy review of existing facts and knowledge (at most 20 claims). " + reviewPrompt(this.company, batch),
+          false,
+          `initial-review:${end}:${batch.at(-1)!.seq}`,
+        );
+        if (report.status === "done") setMeta(this.company, "curator.baseline_seq", String(batch.at(-1)!.seq));
+        return report;
+      }
+      setMeta(this.company, "curator.baseline_seq", String(end));
+    }
+    const since = Number(getMeta(this.company, "curator.review_seq") ?? "0");
     const fresh = changes(this.company, since, 500);
     if (!fresh.length) return null;
     const batch = fresh

@@ -1,5 +1,7 @@
 # Knowledge-first ResultSpace handoff
 
+**Historical first-implementation handoff:** independent review rejected release. Follow-up fixes and verification are recorded in [review remediation](REVIEW-FIXES-KNOWLEDGE-FIRST.md); installed-client coordination is planned in [client migration](deploy/INSTALLED-CLIENT-MIGRATION.md). No release approval is claimed.
+
 Implemented in `feat/knowledge-first-resultspace`, isolated from clean main `9ca71202a4f606a16fcc197efd7962b1618992e3`.
 Implementation commit: `eb7fa30360e4740d141b27828b59cf8d7758dc58` — Redesign ResultSpace around sourced project and company knowledge.
 This handoff and its file manifest are the immediately following documentation commit; use `git log -2 --format='%H %s'` for both exact hashes.

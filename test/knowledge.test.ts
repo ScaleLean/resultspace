@@ -1,3 +1,4 @@
+import { journalItems } from "../src/operations/views.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { admin, member, rec, setup, viewer } from "./helpers.ts";
@@ -357,4 +358,68 @@ test("company attachments remain immutable, retrievable, and isolated", (t) => {
     blob.sha256,
   );
   assert.throws(() => acme.run("delete from blobs"), /never deleted/);
+});
+
+test("Journal creation-time pagination survives more than 1000 recently edited older entries", (t) => {
+  const { acme } = setup(t);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-01T00:00:00Z") });
+  const project = rec(acme, member, "record.create", { kind: "project", body: { title: "Launch" } });
+  const older: Rec[] = [];
+  for (let i = 0; i < 1001; i++) {
+    t.mock.timers.setTime(Date.parse("2026-10-01T00:00:00Z") + i);
+    older.push(rec(acme, member, "journal.log", { title: `Old ${i}`, project: project.id, type: "note" }));
+  }
+  t.mock.timers.setTime(Date.parse("2026-10-02T00:00:00Z"));
+  const newest = rec(acme, member, "journal.log", { title: "Newest event", project: project.id, type: "outcome" });
+  t.mock.timers.setTime(Date.parse("2026-10-03T00:00:00Z"));
+  for (const r of older) rec(acme, member, "record.patch", { ref: r.id, set: { detail: "Edited after the newest event" } });
+  assert.deepEqual(
+    journalItems(acme, { project: project.key, limit: 2 }).map((r) => r.key),
+    [newest.key, older.at(-1)!.key],
+  );
+  assert.deepEqual(
+    journalItems(acme, { since: "2026-10-02T00:00:00Z", limit: 1 }).map((r) => r.key),
+    [newest.key],
+  );
+  assert.equal(journalItems(acme, { type: "outcome", limit: 1 })[0]!.key, newest.key);
+});
+
+test("project source inventory includes a fact-only citation once; learning requires evidence and flags retired citations", (t) => {
+  const { acme } = setup(t);
+  const project = rec(acme, member, "record.create", { kind: "project", body: { title: "Launch" } });
+  const source = rec(acme, member, "record.create", { kind: "source", body: { title: "Supplier email" } });
+  const claim = rec(acme, member, "record.create", { kind: "fact", body: fact(project.id, [source.key], 4) });
+  const context = () => run(acme, viewer, "project.context", { ref: project.key }) as ProjectContext;
+  assert.deepEqual(
+    context().sources.map((e) => e.record.id),
+    [source.id],
+    "source is cited only by the fact, not the project",
+  );
+  rec(acme, member, "record.create", {
+    kind: "knowledge",
+    body: { title: "Compare scopes", project_id: project.id, source_ids: [source.id] },
+  });
+  const learned = rec(acme, member, "journal.log", {
+    title: "Four weeks stated",
+    type: "learning",
+    project: project.key,
+    source_ids: [source.key],
+  });
+  assert.deepEqual(
+    context().sources.map((e) => e.record.id),
+    [source.id],
+    "shared citations are deduplicated",
+  );
+  assert.equal(claim.body.verified, undefined);
+  assert.throws(
+    () => rec(acme, member, "record.create", { kind: "entry", body: { title: "Unsupported", type: "learning" } }),
+    /Learning needs a source/,
+  );
+  assert.throws(() => rec(acme, member, "record.patch", { ref: learned.key, set: { source_ids: [] } }), /Learning needs a source/);
+  rec(acme, member, "record.archive", { ref: source.key });
+  const unsupported = (run(acme, viewer, "curator.scan", {}) as Finding[]).find((f) => f.key === learned.key && f.type === "unsupported");
+  assert.ok(unsupported, "existing learning whose citation is archived remains readable with an explicit evidence finding");
+  assert.equal(context().log[0]!.record.id, learned.id);
+  assert.deepEqual(context().sources, []);
+  rec(acme, member, "journal.log", { title: "Author's sourced claim", type: "learning", source: "Supplier email" });
 });

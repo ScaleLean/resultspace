@@ -129,6 +129,9 @@ test("real API + CLI focused project read and sourced record path", async (t) =>
   const data = context.json().data;
   assert.equal((data.facts as Json[]).length, 1);
   assert.equal(((data.project as Json).record as Json).key, project);
+  const unsourced = await rs("log", "Unsupported learning", "--project", project, "--type", "learning", "--json");
+  assert.notEqual(unsourced.code, 0);
+  assert.match(unsourced.out + unsourced.err, /Learning needs a source/);
   const recorded = await rs(
     "log",
     "Quote confirmed",

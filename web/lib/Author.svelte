@@ -36,7 +36,7 @@
           current_state: "Current state",
           body: "Learning / knowledge",
           project_id: "Project key (optional)",
-          source: "Source or citation",
+          source: kind === "entry" ? "Source or citation (required for learning)" : "Source or citation",
           observed_at: "Observed date (optional)",
           subject: "Subject",
           predicate: "Property",
@@ -62,8 +62,11 @@
     ></label
   >{/if}
 {#each ["source_ids", ...(kind === "project" ? ["fact_ids", "knowledge_ids"] : [])] as k}<label class="field"
-    ><span>{k === "source_ids" ? "Source keys (optional)" : k === "fact_ids" ? "Linked fact keys" : "Linked knowledge keys"}</span><input
-      name={k}
+    ><span
+      >{k === "source_ids"
+        ? kind === "entry" ? "Source keys (or a citation for learning)" : "Source keys (optional)"
+        : k === "fact_ids" ? "Linked fact keys" : "Linked knowledge keys"}</span
+    ><input name={k}
       value={Array.isArray(body[k]) ? (body[k] as unknown[]).join(", ") : ""}
     /></label
   >{/each}

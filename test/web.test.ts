@@ -243,6 +243,8 @@ test("web: authenticated author/read path for projects, facts, learning, issues,
   assert.match(html, /Compare quotes/);
   assert.match(html, /Researching/);
   assert.doesNotMatch(html, /Claim assignment|Agent working|Approve request|Skills/);
+  const sourceResponse = await s.post("/c/acme/sources?/create", { title: "Fact-only supplier source", detail: "Supplier email" });
+  assert.equal(sourceResponse.status, 303);
   const fact = await s.post("/c/acme/facts?/create", {
     title: "Lead time",
     subject: "Supplier A",
@@ -251,6 +253,7 @@ test("web: authenticated author/read path for projects, facts, learning, issues,
     value: "4",
     unit: "weeks",
     source: "Quote A dated Oct 11",
+    source_ids: "SRC-0001",
     project_id: "PRJ-0001",
   });
   assert.equal(fact.status, 303, await fact.text());
@@ -301,11 +304,41 @@ test("web: authenticated author/read path for projects, facts, learning, issues,
     ).status,
     303,
   );
+  const unsourced = await s.post("/c/acme/journal?/log", {
+    title: "Unsupported learning",
+    type: "learning",
+    project_id: "PRJ-0001",
+    source: "  ",
+  });
+  assert.equal(unsourced.status, 400);
+  assert.match(await unsourced.text(), /Learning needs a source/);
   const focused = await (await s.get(path)).text();
   assert.match(focused, /Method learned/);
   assert.match(focused, /Quote compared/);
   assert.match(focused, /Confirm packaging/);
   assert.match(focused, /Chronological log/);
+  assert.match(focused, /sources<\/h2>/);
+  assert.match(focused, /Fact-only supplier source/);
+  const coForEdit = s.companies.get("acme");
+  addAgent(coForEdit, "review-editor", "member");
+  const editKey = issueKey(coForEdit, "review-editor");
+  const editLog = await fetch(s.base + "/v1/op/record.patch", {
+    method: "POST", headers: { authorization: `Bearer ${editKey}`, "content-type": "application/json" },
+    body: JSON.stringify({ ref: "JNL-0001", set: { title: "Quote requires clarification", type: "note", detail: "Supplier withdrew confirmation" }, why: "New supplier email" }),
+  });
+  assert.equal(editLog.status, 200);
+  const logReadback = await (await s.get("/c/acme/journal")).text();
+  assert.match(logReadback, /Quote requires clarification/);
+  assert.match(logReadback, /edited by/);
+  assert.match(logReadback, /review-editor/);
+  const editedContext = await (await s.get(path)).text();
+  assert.match(editedContext, /Supplier withdrew confirmation/);
+  assert.match(editedContext, /review-editor/);
+  const preservedLog = await (await s.get("/c/acme/r/JNL-0001")).text();
+  assert.match(preservedLog, /Quote compared/);
+  assert.match(preservedLog, /Revision 1/);
+  assert.match(preservedLog, /alex/);
+
   assert.equal((await s.get("/c/other-co/r/PRJ-0001")).status, 404);
   const patch = await s.post(path + "?/patch", {
     title: "Launch reviewed",

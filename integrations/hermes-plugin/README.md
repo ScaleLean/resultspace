@@ -16,3 +16,5 @@ Verify against disposable companies:
 cd integrations/hermes-plugin
 python3 -m unittest discover -s tests -v
 ```
+
+The review reports the installed default at 0.14.0 and default plus seven named configs using `resultspace-memory`. The [coordinated upgrade plan](../../docs/deploy/INSTALLED-CLIENT-MIGRATION.md) covers tool replacements, exact identity checks, preservation of runtime memory and disposable smoke tests for all eight configurations. No installation/profile change is performed here.
