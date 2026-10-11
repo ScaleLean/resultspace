@@ -11,11 +11,10 @@ node src/local.ts
 
 It prints the address (http://127.0.0.1:4390) and opens it. From this machine nobody signs in: the
 browser is the owner. First run asks for the company's name and, if you want the Curator, a Fireworks
-API key (https://fireworks.ai, Account → API Keys). Everything except the Curator works without a key.
+API key (https://fireworks.ai, Account → API Keys). Deterministic Curator evidence checks work without a model key; chat and semantic review require one.
 
 Data lives in `~/.local/share/resultspace/data`: one SQLite file per company (`<slug>.sqlite`), one
-for the Curator's conversations (`<slug>.agent.sqlite`), and `_system.sqlite` for people. Back it up
-by copying the directory while the server is stopped, or with `sqlite3 FILE 'vacuum into ...'` while it runs.
+for the Curator's conversations (`<slug>.agent.sqlite`), and `_system.sqlite` for people. For consistent backups and schema upgrades, use the quiesced whole-directory procedure in [MIGRATION.md](MIGRATION.md). A single-file live snapshot does not capture a consistent server state.
 
 ## Agents on the same machine
 

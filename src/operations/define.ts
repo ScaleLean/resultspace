@@ -16,18 +16,24 @@ export type Operation = {
   write: boolean;
   input: TSchema;
   run: (ctx: Ctx, input: unknown) => unknown;
-  /** Set on an old name kept as an alias: the operation that replaces it. Aliases are left out of tool lists. */
-  replacedBy?: string;
 };
 
-export function op<S extends TSchema>(def: Omit<Operation, "input" | "run"> & { input: S; run: (ctx: Ctx, input: Static<S>) => unknown }): Operation {
+export function op<S extends TSchema>(
+  def: Omit<Operation, "input" | "run"> & { input: S; run: (ctx: Ctx, input: Static<S>) => unknown },
+): Operation {
   return { ...def, run: (ctx, input) => def.run(ctx, input as Static<S>) };
 }
 
-export const Ref = Type.String({ minLength: 1, maxLength: 80, description: "A record key (TSK-0007) or id" });
+export const Ref = Type.String({ minLength: 1, maxLength: 80, description: "A record key (PRJ-0001) or id" });
 export const Body = Type.Record(Type.String(), Type.Unknown());
 export const Why = Type.Optional(Type.String({ maxLength: 500, description: "Why this change was made" }));
-export const Result = Type.Optional(Type.String({ minLength: 1, maxLength: 300, description: "The outcome, result first: what changed or is now true. Recorded as a result." }));
+export const Result = Type.Optional(
+  Type.String({
+    minLength: 1,
+    maxLength: 300,
+    description: "The outcome, result first: what changed or is now true. Recorded as a result.",
+  }),
+);
 export const Limit = (max: number) => Type.Optional(Type.Integer({ minimum: 1, maximum: max }));
 
 export const who = (ctx: Ctx): Who => ({ name: ctx.actor.name, kind: ctx.actor.kind, role: ctx.actor.role });

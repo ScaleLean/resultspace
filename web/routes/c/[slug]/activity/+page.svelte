@@ -1,4 +1,4 @@
-<!-- Activity: every change to every record, newest first, grouped by day. Agent sessions are folded away unless asked for. -->
+<!-- Activity: every change to every record, newest first, grouped by day. Includes preserved history from the legacy archive. -->
 <script lang="ts">
   import Avatar from "#lib/Avatar.svelte";
   import TypeIcon from "#lib/TypeIcon.svelte";
@@ -6,17 +6,17 @@
   import type { Change } from "./+page.server.ts";
   let { data } = $props();
   const label: Record<string, string> = { "24h": "24 hours", "7d": "7 days" };
-  let sessions = $state(false);
-  // A Journal entry for a tool-call session is noise here unless looked for.
-  const isSession = (c: Change) => c.kind === "entry" && /\(session end\)/.test(c.title);
-  const shown = $derived(sessions ? data.changes : data.changes.filter((c) => !isSession(c)));
-  const hidden = $derived(data.changes.length - data.changes.filter((c) => !isSession(c)).length);
+  const shown = $derived(data.changes);
   function what(c: Change): string {
     const op = c.op.split(".").pop() ?? c.op;
     if (/creat|add|log|import/.test(op) && c.changed.length !== 1) return "added";
     if (/archiv/.test(op)) return "archived";
     if (/restor/.test(op)) return "restored";
-    const f = c.changed.filter((x) => x !== "updated_at").slice(0, 2).map(words).join(" and ");
+    const f = c.changed
+      .filter((x) => x !== "updated_at")
+      .slice(0, 2)
+      .map(words)
+      .join(" and ");
     return f ? `changed ${f}${c.changed.length > 2 ? " and more" : ""}` : words(op);
   }
 </script>
@@ -30,13 +30,17 @@
   </header>
   <div class="bar">
     <nav class="seg" aria-label="Period">
-      {#each Object.keys(label) as s}<a class:on={data.since === s} href="?since={s}" aria-current={data.since === s ? "true" : undefined}>{label[s]}</a>{/each}
+      {#each Object.keys(label) as s}<a class:on={data.since === s} href="?since={s}" aria-current={data.since === s ? "true" : undefined}
+          >{label[s]}</a
+        >{/each}
     </nav>
-    {#if hidden}<label class="tog"><input type="checkbox" bind:checked={sessions} /> Show {hidden} agent sessions</label>{/if}
   </div>
   {#if shown.length}
     {#each byDay(shown, (c) => c.at) as g}
-      <div class="section-head"><h2>{g.day}</h2><span class="count">{g.rows.length}</span></div>
+      <div class="section-head">
+        <h2>{g.day}</h2>
+        <span class="count">{g.rows.length}</span>
+      </div>
       <div class="list">
         {#each g.rows as c (c.seq)}
           {@const s = split(c.title, 100)}
@@ -59,13 +63,55 @@
 </div>
 
 <style>
-  .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 4px; }
-  .seg { display: inline-flex; background: var(--hover); border-radius: 10px; padding: 3px; gap: 2px; }
-  .seg a { min-height: 38px; padding: 0 12px; display: inline-flex; align-items: center; border-radius: 8px; text-decoration: none; font-size: 13.5px; font-weight: 500; color: var(--ink-2); }
-  .seg a.on { background: var(--card); color: var(--ink); box-shadow: var(--shadow); font-weight: 600; }
-  .tog { display: inline-flex; gap: 8px; align-items: center; font-size: 13.5px; color: var(--dim); min-height: 44px; cursor: pointer; }
-  .act { align-items: flex-start; }
-  .line { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
-  .row-title { font-size: 14.5px; }
-  .at { font-size: 12px; color: var(--faint); white-space: nowrap; flex: none; font-variant-numeric: tabular-nums; padding-top: 2px; }
+  .bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 4px;
+  }
+  .seg {
+    display: inline-flex;
+    background: var(--hover);
+    border-radius: 10px;
+    padding: 3px;
+    gap: 2px;
+  }
+  .seg a {
+    min-height: 38px;
+    padding: 0 12px;
+    display: inline-flex;
+    align-items: center;
+    border-radius: 8px;
+    text-decoration: none;
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--ink-2);
+  }
+  .seg a.on {
+    background: var(--card);
+    color: var(--ink);
+    box-shadow: var(--shadow);
+    font-weight: 600;
+  }
+  .act {
+    align-items: flex-start;
+  }
+  .line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+  }
+  .row-title {
+    font-size: 14.5px;
+  }
+  .at {
+    font-size: 12px;
+    color: var(--faint);
+    white-space: nowrap;
+    flex: none;
+    font-variant-numeric: tabular-nums;
+    padding-top: 2px;
+  }
 </style>

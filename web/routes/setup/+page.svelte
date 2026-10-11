@@ -10,11 +10,24 @@
   // svelte-ignore state_referenced_locally
   let slugTouched = $state(!!form?.slug);
   let busy = $state("");
-  const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
-  $effect(() => { if (!slugTouched) slug = slugify(name); });
+  const slugify = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 63);
+  $effect(() => {
+    if (!slugTouched) slug = slugify(name);
+  });
   const working = (what: string) => () => {
     busy = what;
-    return async ({ update }: { update: (o?: { reset?: boolean }) => Promise<void> }) => { try { await update({ reset: false }); } finally { busy = ""; } };
+    return async ({ update }: { update: (o?: { reset?: boolean }) => Promise<void> }) => {
+      try {
+        await update({ reset: false });
+      } finally {
+        busy = "";
+      }
+    };
   };
 </script>
 
@@ -26,7 +39,9 @@
     <form method="POST" action="?/account" class="card" use:enhance>
       {#if form?.error}<p class="error" role="alert">{form.error}</p>{/if}
       <label class="field"><span>Your name</span><input name="name" autocomplete="name" required value={form?.name ?? ""} /></label>
-      <label class="field"><span>Email</span><input name="email" type="email" autocomplete="username" required value={form?.email ?? ""} /></label>
+      <label class="field"
+        ><span>Email</span><input name="email" type="email" autocomplete="username" required value={form?.email ?? ""} /></label
+      >
       <label class="field"><span>Password</span><input name="password" type="password" autocomplete="new-password" required /></label>
       <button class="btn primary wide">Create account</button>
     </form>
@@ -39,14 +54,32 @@
     <form method="POST" action="?/company" class="card" use:enhance={working("company")}>
       {#if form?.error}
         <p class="error" role="alert">{form.error}</p>
-        {#if form.created}<p><a class="btn wide" href="/c/{form.created}">Go on without a key</a></p>{/if}
+        {#if "created" in form && form.created}<p><a class="btn wide" href="/c/{form.created}">Go on without a key</a></p>{/if}
       {/if}
-      <label class="field"><span>Company name</span><input name="name" required maxlength="120" placeholder="Acme" bind:value={name} /></label>
-      <label class="field"><span>Slug <small class="muted">in web addresses</small></span><input name="slug" class="mono" required maxlength="63" pattern="[a-z0-9][a-z0-9\-]*" autocapitalize="off" autocorrect="off" spellcheck="false" bind:value={slug} oninput={() => (slugTouched = true)} /></label>
+      <label class="field"
+        ><span>Company name</span><input name="name" required maxlength="120" placeholder="Acme" bind:value={name} /></label
+      >
+      <label class="field"
+        ><span>Slug <small class="muted">in web addresses</small></span><input
+          name="slug"
+          class="mono"
+          required
+          maxlength="63"
+          pattern="[a-z0-9][a-z0-9\-]*"
+          autocapitalize="off"
+          autocorrect="off"
+          spellcheck="false"
+          bind:value={slug}
+          oninput={() => (slugTouched = true)}
+        /></label
+      >
       <p class="muted hint">Lower-case letters, digits and dashes.</p>
 
       <div class="keyhead"><span>Fireworks key</span><span class="muted">optional</span></div>
-      <p class="muted hint">The Curator uses it to review what agents write, write your daily briefing and chat. Everything else works without a key; you can add one later in Admin.</p>
+      <p class="muted hint">
+        The Curator uses it to review what agents write, write your daily briefing and chat. Everything else works without a key; you can
+        add one later in Admin.
+      </p>
       <div class="keyrow">
         <input name="key" type="password" class="mono" autocomplete="off" placeholder="fw_…" aria-label="Fireworks key" />
         <button class="btn" formaction="?/testKey" disabled={busy !== ""}>{busy === "testKey" ? "Testing…" : "Test key"}</button>
@@ -58,10 +91,39 @@
 </main>
 
 <style>
-  .setup{max-width:480px}
-  .hint{font-size:12.5px;margin:-6px 0 12px}
-  .field .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:16px}
-  .field small{font-weight:400}
-  .keyhead{display:flex;gap:8px;font-size:13px;font-weight:600;margin:0 0 4px}.keyhead .muted{font-weight:400}
-  .keyrow{display:flex;gap:8px;margin:0 0 12px}.keyrow input{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:16px}
+  .setup {
+    max-width: 480px;
+  }
+  .hint {
+    font-size: 12.5px;
+    margin: -6px 0 12px;
+  }
+  .field .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 16px;
+  }
+  .field small {
+    font-weight: 400;
+  }
+  .keyhead {
+    display: flex;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    margin: 0 0 4px;
+  }
+  .keyhead .muted {
+    font-weight: 400;
+  }
+  .keyrow {
+    display: flex;
+    gap: 8px;
+    margin: 0 0 12px;
+  }
+  .keyrow input {
+    flex: 1;
+    min-width: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 16px;
+  }
 </style>

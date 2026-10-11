@@ -2,17 +2,17 @@
 import type { Db } from "./db.ts";
 import { invalid } from "./errors.ts";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 // Refuses a statement outright: used for "never delete" and "history is append-only".
 const forbid = (name: string, when: string, table: string, message: string) =>
   `create trigger ${name} before ${when} on ${table} begin select raise(abort, '${message}'); end;`;
 
-const EVIDENCE_AUTHORITY_DDL = `
-create table evidence_authority (
-  record_id text primary key references records (id),
-  assignment_ids text not null check (json_valid(assignment_ids))
-) strict;
+const ARCHIVE_DDL = `
+create table legacy_records (record_id text primary key references records(id), original_kind text not null, reason text not null) strict;
+create trigger legacy_records_no_update before update on legacy_records begin select raise(abort, 'legacy archive is read-only'); end;
+create trigger legacy_records_no_delete before delete on legacy_records begin select raise(abort, 'legacy archive is read-only'); end;
+create trigger legacy_record_no_update before update on records when exists (select 1 from legacy_records where record_id = old.id) begin select raise(abort, 'legacy archive is read-only'); end;
 `;
 
 export const DDL = `
@@ -57,7 +57,7 @@ create table revisions (
   unique (record_id, rev)
 ) strict;
 
-${EVIDENCE_AUTHORITY_DDL}
+${ARCHIVE_DDL}
 
 create table ops (
   op_id text primary key,
@@ -91,8 +91,6 @@ create table agent_keys (
   revoked_at text
 ) strict;
 
--- Last time each agent's session checked in. Not a record: it is overwritten, and losing it loses nothing.
-create table presence (agent text primary key, session text not null, at text not null) strict;
 
 -- One row per Curator run (a review, a briefing, upkeep), with what it cost.
 create table curator_runs (
@@ -123,102 +121,179 @@ export type KindDef = {
 };
 
 const PLAN = ["planned", "active", "complete", "archived"];
-
-// Kinds every company starts with. A company adds its own (formulas, funnels, claims...) as rows.
-// An assignment's lifecycle. `done` means the agent reported a result; it does not mean anyone verified it.
-export const ASSIGNMENT_OPEN = ["queued", "picked_up", "in_progress", "needs_permission"];
-export const ASSIGNMENT_FINAL = ["done", "failed", "cancelled"];
-
-// Before schema 3 an assignment was a `work_order` (keys WO-...) and Journal entries pointed at it with
-// `work_order_id`. Old keys stay on their records; the old names are accepted on the way in and mean the new ones.
-// The kind name and the prefix stay reserved, so a WO- key always means an assignment.
-export const LEGACY_KINDS: Record<string, string> = { work_order: "assignment" };
-export const LEGACY_FIELDS: Record<string, string> = { work_order_id: "assignment_id" };
-export const LEGACY_PREFIXES = ["WO"];
-export const canonicalKind = (kind: string): string => LEGACY_KINDS[kind] ?? kind;
-
 export const BUILTIN_KINDS: KindDef[] = [
-  { kind: "company", prefix: "CO", title_field: "name", statuses: null, refs: {} },
-  { kind: "goal", prefix: "GOAL", title_field: "title", statuses: PLAN, refs: {} },
-  { kind: "project", prefix: "PRJ", title_field: "title", statuses: PLAN, refs: { goal_id: "goal" } },
-  { kind: "task", prefix: "TSK", title_field: "title", statuses: ["todo", "in_progress", "blocked", "done", "cancelled"], refs: { project_id: "project", artifact_ids: "artifact" } },
-  // A file: its bytes are an attachment (blob) named by `sha256`.
-  { kind: "artifact", prefix: "ART", title_field: "title", statuses: null, refs: {} },
-  // The Journal: what happened. One kind, four types: outcome (what changed or is now true), action (an
-  // outward action an agent took: spend, ads, publish...), session (what an agent session did), note.
-  // `about_id` is the record it is about, when there is one; `assignment_id` the assignment it was done under.
-  { kind: "entry", prefix: "JNL", title_field: "title", statuses: null, refs: { about_id: null, project_id: "project", assignment_id: "assignment" } },
-  // An outcome handed to one agent: brief, owner, optional project and due date, lifecycle status, the result the
-  // agent reports, and (separately) whether a person verified it. Not a project (a body of work) and not a task (a to-do).
-  { kind: "assignment", prefix: "ASG", title_field: "title", statuses: [...ASSIGNMENT_OPEN, ...ASSIGNMENT_FINAL], refs: { project_id: "project" } },
-  // The Curator's work product. A flag is a finding about a record. A request is a change that waits for a
-  // person. A briefing is the daily summary for a person.
-  { kind: "flag", prefix: "FLG", title_field: "title", statuses: ["open", "fixed", "dismissed"], refs: { about_id: null, other_id: null } },
-  { kind: "request", prefix: "REQ", title_field: "title", statuses: ["open", "approved", "declined"], refs: { about_id: null } },
-  { kind: "briefing", prefix: "BRF", title_field: "title", statuses: null, refs: {} },
-  { kind: "knowledge", prefix: "KNW", title_field: "title", statuses: null, refs: {} },
-  { kind: "source", prefix: "SRC", title_field: "title", statuses: null, refs: {} },
-  { kind: "decision", prefix: "DEC", title_field: "title", statuses: null, refs: {} },
-  // How we do things. A skill cites the knowledge it depends on, so a change there reaches the skill.
-  { kind: "skill", prefix: "SKL", title_field: "title", statuses: ["draft", "active", "retired"], refs: { knowledge_ids: "knowledge" } },
+  {
+    kind: "company",
+    prefix: "CO",
+    title_field: "name",
+    statuses: null,
+    refs: {},
+  },
+  {
+    kind: "project",
+    prefix: "PRJ",
+    title_field: "title",
+    statuses: PLAN,
+    refs: {
+      fact_ids: "fact",
+      knowledge_ids: "knowledge",
+      source_ids: "source",
+    },
+  },
+  {
+    kind: "fact",
+    prefix: "FCT",
+    title_field: "title",
+    statuses: null,
+    refs: { project_id: "project", source_ids: "source" },
+  },
+  {
+    kind: "knowledge",
+    prefix: "KNW",
+    title_field: "title",
+    statuses: null,
+    refs: {
+      project_id: "project",
+      source_ids: "source",
+      fact_ids: "fact",
+      knowledge_ids: "knowledge",
+    },
+  },
+  {
+    kind: "entry",
+    prefix: "JNL",
+    title_field: "title",
+    statuses: null,
+    refs: {
+      about_id: null,
+      project_id: "project",
+      source_ids: "source",
+      fact_ids: "fact",
+      knowledge_ids: "knowledge",
+    },
+  },
+  {
+    kind: "issue",
+    prefix: "ISS",
+    title_field: "title",
+    statuses: ["open", "resolved", "dismissed"],
+    refs: { project_id: "project", about_id: null, source_ids: "source" },
+  },
+  {
+    kind: "flag",
+    prefix: "FLG",
+    title_field: "title",
+    statuses: ["open", "fixed", "dismissed"],
+    refs: { about_id: null, other_id: null, evidence_ids: null },
+  },
+  {
+    kind: "briefing",
+    prefix: "BRF",
+    title_field: "title",
+    statuses: null,
+    refs: {},
+  },
+  {
+    kind: "source",
+    prefix: "SRC",
+    title_field: "title",
+    statuses: null,
+    refs: {},
+  },
+  {
+    kind: "artifact",
+    prefix: "ART",
+    title_field: "title",
+    statuses: null,
+    refs: {},
+  },
+  {
+    kind: "decision",
+    prefix: "DEC",
+    title_field: "title",
+    statuses: null,
+    refs: { project_id: "project", source_ids: "source" },
+  },
 ];
-
-export const ENTRY_TYPES = ["outcome", "action", "session", "note"] as const;
+export const ENTRY_TYPES = ["outcome", "learning", "note"] as const;
 export type EntryType = (typeof ENTRY_TYPES)[number];
 
-/** Schema upgrades, oldest first. Each runs once, inside a transaction, when an older file is opened. */
+/** Schemas 2, 3 and 4 upgrade directly: old bodies and kind names are preserved verbatim. */
 export const UPGRADES: Record<number, string | ((db: Db) => void)> = {
-  // 1 -> 2: results, actions, receipts and notes become Journal entries (keys and history unchanged); skills arrive.
-  2: `
-    insert or ignore into kinds (kind, prefix, title_field, statuses, refs) values
-      ('entry', 'JNL', 'title', null, '{"about_id":null,"project_id":"project","work_order_id":"work_order"}'),
-      ('skill', 'SKL', 'title', '["draft","active","retired"]', '{"knowledge_ids":"knowledge"}');
-    update records set body = json_set(body, '$.type', case kind when 'result' then 'outcome' when 'action' then 'action' when 'receipt' then 'session' else 'note' end), kind = 'entry'
-      where kind in ('result', 'action', 'receipt', 'note');
-    delete from kinds where kind in ('result', 'action', 'receipt', 'note');
-  `,
-  // 2 -> 3: work orders become assignments (see assignmentUpgrade).
-  3: assignmentUpgrade,
-  4: EVIDENCE_AUTHORITY_DDL,
+  5: knowledgeUpgrade,
 };
 
-/**
- * Work orders become assignments. Ids, keys (WO-...), revisions, times, authors, owners, results and links are
- * kept; only the kind's name and the Journal field that points at it change. New assignments get ASG- keys.
- * History is append-only, so past revisions keep the body they had (with `work_order_id`). Refuses, changing
- * nothing, when the company already uses the name `assignment` or the prefix ASG for something else.
- */
-function assignmentUpgrade(db: Db): void {
-  const clash = db.one<{ kind: string }>("select kind from kinds where kind = 'assignment' or (prefix = 'ASG' and kind <> 'work_order')");
-  if (clash) throw invalid(`cannot make work orders into assignments: kind ${clash.kind} already uses the name assignment or the prefix ASG`);
-  const def = BUILTIN_KINDS.find((k) => k.kind === "assignment")!;
-  const old = db.one<{ title_field: string; statuses: string | null; refs: string }>("select title_field, statuses, refs from kinds where kind = 'work_order'");
-  db.run("insert into kinds (kind, prefix, title_field, statuses, refs) values ('assignment', ?, ?, ?, ?)",
-    def.prefix, old?.title_field ?? def.title_field, old ? old.statuses : JSON.stringify(def.statuses), old?.refs ?? JSON.stringify(def.refs));
-  const assignments = db.one<{ n: number }>("select count(*) as n from records where kind = 'work_order'")!.n;
-  db.run("update records set kind = 'assignment' where kind = 'work_order'");
-  db.run("delete from kinds where kind = 'work_order'");
-
-  // Reference fields of every kind: work_order_id -> assignment_id, and "points at a work_order" -> "at an assignment".
-  const kinds: string[] = [];
-  for (const k of db.all<{ kind: string; refs: string }>("select kind, refs from kinds")) {
-    const refs = JSON.parse(k.refs) as Record<string, string | null>;
-    const next = Object.fromEntries(Object.entries(refs).map(([f, t]) => [LEGACY_FIELDS[f] ?? f, t === null ? null : canonicalKind(t)]));
-    if (JSON.stringify(next) !== JSON.stringify(refs)) { db.run("update kinds set refs = ? where kind = ?", JSON.stringify(next), k.kind); kinds.push(k.kind); }
+/** No records, revisions, links, counters, credentials, blobs or op outcomes are rewritten or removed. */
+function knowledgeUpgrade(db: Db): void {
+  db.exec(ARCHIVE_DDL);
+  const live = new Set(BUILTIN_KINDS.map((k) => k.kind));
+  for (const k of db.all<{ kind: string }>("select kind from kinds")) {
+    if (!live.has(k.kind))
+      db.run(
+        "insert into legacy_records select id, kind, 'retired in schema 5' from records where kind = ?",
+        k.kind,
+      );
   }
-
-  // Current bodies (Journal entries, mostly) point at their assignment with assignment_id.
-  let relinked = 0;
-  for (const r of db.all<{ id: string; key: string; body: string }>("select id, key, body from records where json_type(body, '$.work_order_id') is not null")) {
-    const body = JSON.parse(r.body) as Record<string, unknown>;
-    if (body.assignment_id !== undefined && body.assignment_id !== body.work_order_id) throw invalid(`${r.key} has both work_order_id and a different assignment_id`);
-    const { work_order_id, ...rest } = body;
-    db.run("update records set body = ? where id = ?", JSON.stringify({ ...rest, assignment_id: work_order_id }), r.id);
-    relinked++;
+  // Raw runtime traces are historical evidence; keep them out of the meaningful project log.
+  db.run(
+    "insert or ignore into legacy_records select id, kind, 'runtime trace retired in schema 5' from records where kind = 'entry' and json_extract(body, '$.type') in ('session', 'action')",
+  );
+  for (const k of BUILTIN_KINDS) {
+    const existing = db.one<{ prefix: string }>(
+      "select prefix from kinds where kind = ?",
+      k.kind,
+    );
+    if (!existing) {
+      if (db.one("select 1 from kinds where prefix = ?", k.prefix))
+        throw invalid(
+          `cannot upgrade: prefix ${k.prefix} is already used; review on a disposable copy`,
+        );
+      db.run(
+        "insert into kinds values (?, ?, ?, ?, ?)",
+        k.kind,
+        k.prefix,
+        k.title_field,
+        k.statuses ? JSON.stringify(k.statuses) : null,
+        JSON.stringify(k.refs),
+      );
+    } else {
+      if (k.kind === "fact" || k.kind === "issue")
+        throw invalid(
+          `cannot upgrade: kind ${k.kind} already exists; review a migration mapping on a disposable copy`,
+        );
+      // Keep every old declared reference too: prior company-specific links still validate.
+      const old = db.one<{ refs: string }>(
+        "select refs from kinds where kind = ?",
+        k.kind,
+      )!;
+      db.run(
+        "update kinds set refs = ? where kind = ?",
+        JSON.stringify({ ...JSON.parse(old.refs), ...k.refs }),
+        k.kind,
+      );
+    }
   }
-  // Links are named after the field they come from.
-  const links = db.one<{ n: number }>("select count(*) as n from links where label = 'work_order'")!.n;
-  db.run("insert or ignore into links (from_id, to_id, label) select from_id, to_id, 'assignment' from links where label = 'work_order'");
-  db.run("delete from links where label = 'work_order'");
-  db.run("insert into meta (k, v) values ('upgrade_3', ?)", JSON.stringify({ at: new Date().toISOString(), assignments, relinked, links, kinds }));
+  for (const table of ["presence", "evidence_authority"]) {
+    if (
+      db.one(
+        "select 1 from sqlite_master where type = 'table' and name = ?",
+        table,
+      )
+    ) {
+      db.exec(`alter table ${table} rename to legacy_${table};
+        create trigger legacy_${table}_no_update before update on legacy_${table} begin select raise(abort, 'legacy archive is read-only'); end;
+        create trigger legacy_${table}_no_delete before delete on legacy_${table} begin select raise(abort, 'legacy archive is read-only'); end;
+        create trigger legacy_${table}_no_insert before insert on legacy_${table} begin select raise(abort, 'legacy archive is read-only'); end;`);
+    }
+  }
+  db.run(
+    "insert into meta values ('upgrade_5', ?)",
+    JSON.stringify({
+      at: new Date().toISOString(),
+      cutoff: "0.4.0",
+      archived: db.one<{ n: number }>(
+        "select count(*) as n from legacy_records",
+      )!.n,
+    }),
+  );
 }

@@ -9,7 +9,8 @@ Needs Node 26 or newer (and Python 3.11+ for the Hermes plugin tests).
 ```sh
 npm ci
 npm run build            # the web app (the web tests need it)
-npm test                 # type-check and tests, a few seconds
+npm test                 # retained critical invariants and author/read paths
+npm run check:web        # Svelte and route type checks
 node src/local.ts        # run it: http://127.0.0.1:4390
 ```
 
@@ -22,7 +23,7 @@ they are not part of `npm test`.
 - Keep one company's data inside its own file. Anything that lets one company see another's
   records, agents or keys is a bug (see [SECURITY.md](SECURITY.md) for how to report it privately).
 - New operations go in `src/operations/`; the API, MCP, `rs` and the Curator's tools are all made from it.
-- Add or update a test with every change, and keep `npm test` passing.
+- Keep critical tests for authentication/isolation, data/history, migration/rollback, evidence and real author/read paths. Delete tests exclusive to retired features; preserve tests for retained invariants.
 - Never commit keys, data directories or `*.sqlite` files.
 
 By contributing you agree your work is released under the [MIT License](LICENSE).

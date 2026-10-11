@@ -20,7 +20,7 @@ test("isolation: one company's records cannot be read, found or referenced from 
   assert.throws(() => run(other, member, "record.get", { ref: secret.key }), code("not_found"));
   assert.deepEqual(run(other, member, "record.search", { q: "confidential-figure" }) as Hit[], []);
   assert.deepEqual(run(other, member, "changes.since", { since: 0 }), []);
-  assert.throws(() => run(other, member, "record.create", { kind: "project", body: { title: "P", goal_id: secret.id } }), code("invalid"));
+  assert.throws(() => run(other, member, "record.create", { kind: "issue", body: { title: "P", project_id: secret.id } }), code("invalid"));
   // An undeclared *_id that names another company's record is kept as plain text and makes no link.
   const n = rec(other, member, "record.create", { kind: "entry", body: { title: "N", source_id: secret.id } });
   assert.deepEqual(run(other, member, "record.links", { ref: n.key }), { out: [], in: [] });
@@ -90,15 +90,18 @@ test("repeat-safe: the same op id applies once and returns the first outcome", (
   assert.throws(() => run(acme, member, "record.create", { kind: "entry", body: { title: "Twice" } }, "op-create-0001"), code("conflict"));
   assert.throws(() => run(acme, admin, "record.create", input, "op-create-0001"), code("conflict"));
   // A write that fails leaves nothing behind, so the same id can be sent again once the input is fixed... as a new request.
-  assert.throws(() => run(acme, member, "record.create", { kind: "task", body: { title: "T", status: "bogus" } }, "op-create-0002"), code("invalid"));
+  assert.throws(
+    () => run(acme, member, "record.create", { kind: "task", body: { title: "T", status: "bogus" } }, "op-create-0002"),
+    code("invalid"),
+  );
   assert.equal(acme.all("select * from ops where op_id = 'op-create-0002'").length, 0);
   assert.equal(acme.all("select * from records where kind = 'task'").length, 0);
 });
 
-test("roles: a viewer reads, a member writes records, an admin defines kinds", (t) => {
+test("roles: a viewer reads, a member writes records, an admin manages identities", (t) => {
   const { acme } = setup(t);
   assert.throws(() => run(acme, viewer, "record.create", { kind: "entry", body: { title: "x" } }), code("forbidden"));
-  assert.throws(() => run(acme, member, "kind.define", { kind: "formula", prefix: "FRM" }), code("forbidden"));
+  assert.throws(() => run(acme, member, "agent.add", { name: "reader" }), code("forbidden"));
   assert.deepEqual(run(acme, viewer, "record.list", {}), []);
   assert.throws(() => run(acme, admin, "record.nope", {}), code("not_found"));
   assert.throws(() => run(acme, member, "record.create", { kind: "entry" }), code("invalid"));
@@ -106,8 +109,19 @@ test("roles: a viewer reads, a member writes records, an admin defines kinds", (
 });
 
 test("code rules: no `any` in the source", () => {
-  const files = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(d, e.name)) : e.name.endsWith(".ts") ? [join(d, e.name)] : []));
-  const bad = files("src").flatMap((f) => readFileSync(f, "utf8").split("\n").map((line, i) => ({ f, n: i + 1, line })))
+  const files = (d: string): string[] =>
+    readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? files(join(d, e.name)) : e.name.endsWith(".ts") ? [join(d, e.name)] : [],
+    );
+  const bad = files("src")
+    .flatMap((f) =>
+      readFileSync(f, "utf8")
+        .split("\n")
+        .map((line, i) => ({ f, n: i + 1, line })),
+    )
     .filter((x) => /(:\s*any\b|\bas any\b|<any>|\bany\[\])/.test(x.line.replace(/\/\/.*$/, "")));
-  assert.deepEqual(bad.map((x) => `${x.f}:${x.n}`), []);
+  assert.deepEqual(
+    bad.map((x) => `${x.f}:${x.n}`),
+    [],
+  );
 });

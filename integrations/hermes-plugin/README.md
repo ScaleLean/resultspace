@@ -1,85 +1,18 @@
-# ResultSpace plugins for Hermes
+# Hermes knowledge integration
 
-Two plugins connect a Hermes agent profile to a ResultSpace server.
+This repo-owned plugin exposes `rs_context` (project context, record context or search) and `rs_learn` (explicit sourced project learning). It adds the company brief at session start. Hermes owns its runtime and tools; ResultSpace holds company knowledge and provenance.
 
-- `resultspace/` gives the agent the company brief at session start, records outward actions
-  (spend, ads, publish, email, prices, deploy and so on) without ever blocking them, sends a short
-  activity receipt after tool use, keeps a presence heartbeat while a session is live, and hands
-  over assignments (called work orders before ResultSpace schema 3). Its tools are `rs_act` and
-  `rs_work` (the tool keeps its old name; it lists, claims and shows assignments).
-- `resultspace-memory/` is a Hermes memory provider. It searches ResultSpace records
-  (`rs_recall`) and saves durable business facts as `knowledge` records (`rs_remember`).
-  It loads `rsclient.py` from the `resultspace/` folder next to it, so install both.
+Use the profile's existing ResultSpace CLI config: `server_url`, `default_company`, and a `key_file` under `[companies.<slug>]`. Keys must be mode 0600 and are never returned by the knowledge tools. No installed profiles are changed by this repo.
 
-All server calls go through `resultspace/rsclient.py`. It uses only the Python standard library
-(Python 3.11 or newer, for `tomllib`).
+## Upgrade cutoff
 
-## Config file
+Server 0.4.0 and plugin 0.15.0 replace assignment, action-log, guard, presence, receipt and dispatch integrations. Retired operations return not-found. Remove old tool names from runtime configuration when upgrading; replace reads with `rs_context` and explicit outcomes with `rs log` or `rs_learn`.
 
-The plugins read the same file as the `rs` command line tool. They look in this order:
+The `resultspace-memory` provider has been retired. If an installed profile uses it, change that profile's provider during the reviewed upgrade to its runtime's supported memory provider. This repository does not modify MEMORY.md, SKILL.md or installed profiles. Method learnings remain sourced project knowledge; long-term skill ownership is undecided.
 
-1. the path in `$RS_CONFIG`
-2. `~/.config/resultspace/profiles/<profile>/cli.toml`
-3. `~/.config/resultspace/cli.toml`
-
-The profile is `$RS_PROFILE` when set. Otherwise it is the last part of `$HERMES_HOME` when that
-path is `.../profiles/<name>`, and `default` in every other case.
-
-```toml
-server_url = "http://127.0.0.1:4390"
-default_company = "acme"
-
-[companies.acme]
-key_file = "/home/me/.config/resultspace/profiles/acme/acme.key"
-```
-
-Each key belongs to one company, so there is one key file per company. A key file must be
-private (`chmod 600`), or the client refuses to use it. The file holds only the key. The config
-holds only the path. The key is read for each request and is never logged or returned.
-
-A call uses `default_company`. With no default, it uses the only company in the file.
-
-## Install
-
-Copy both folders into the Hermes plugins directory, or into one profile's `plugins/` directory:
-
-```sh
-cp -r resultspace resultspace-memory ~/.hermes/plugins/
-```
-
-Then restart Hermes. An operator creates the agent and its key on the server:
-
-```sh
-node src/admin.ts agent add <company> <agent-name> member
-node src/admin.ts agent key <company> <agent-name> --out <key file>
-```
-
-## Tests
-
-The tests start the real server from this repository on `127.0.0.1` with a temporary data
-directory. They need Node (the version the server uses) and Python 3.11 or newer. They need no
-Hermes install and call no remote server.
+Verify against disposable companies:
 
 ```sh
 cd integrations/hermes-plugin
 python3 -m unittest discover -s tests -v
 ```
-
-- `tests/test_rsclient.py` runs every client call end to end, plus the plugin functions that
-  build requests (brief, outward action, remember, recall).
-- `tests/test_guard.py` and `tests/test_facts.py` are unit tests of the action classifier and the
-  fact filter. They need no server.
-
-## Old routes
-
-The plugin code still calls `client.get("/v1/work")`, `client.post("/v1/ops", ...)` and similar.
-`rsclient.py` turns each of these into a `POST /v1/op/<operation>` call and returns the shape the
-plugin code reads. New code should call the named methods instead: `brief`, `record_action`,
-`receipt`, `presence`, `assignment_list`, `assignment_next`, `assignment_claim`, `assignment_show`,
-`search`, `create_record`, or `op(name, input)` for any other operation.
-
-The `assignment_*` methods fall back to the old `work.*` operations on a server from before the
-rename. `work_list`, `work_next`, `work_show` and the `/v1/work` routes keep the old names and
-shapes (`work_orders`, `work_order`, `results`, `receipts`) until the server drops the `work.*`
-aliases; see `docs/design/ASSIGNMENTS.md`. A dispatcher may set `RS_ASSIGNMENT` (old name:
-`RS_WORK_ORDER`) to link a run's receipts and actions to one assignment.

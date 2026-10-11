@@ -1,7 +1,7 @@
 {
   "name": "resultspace",
-  "version": "0.3.0",
-  "description": "Each company's work, journal, knowledge and skills, kept apart from every other company. Agents write it; people check it on a phone; a built-in Curator keeps it true.",
+  "version": "0.4.0",
+  "description": "Company and project knowledge, sourced facts and learning, readable on a phone.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -28,7 +28,7 @@
     "@sveltejs/vite-plugin-svelte": "^7",
     "@types/node": "^26.0.0",
     "svelte": "^5.57",
-    "typescript": "7.0.2",
+    "typescript": "6.0.3",
     "vite": "^8"
   },
   "overrides": {
