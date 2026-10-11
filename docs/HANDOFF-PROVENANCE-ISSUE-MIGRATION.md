@@ -1,5 +1,17 @@
 # Provenance and legacy issue migration handoff
 
+## Latest review follow-up: transitive historical Journal scope
+
+Implementation **b4102c79ea5be2a8aa0e917619cc076c9a47641b**, based on **d6d6afc65d619c5d320f752f708e7b9597894e48**. Canonical resolution now follows the complete historical `about` chain, preserving null/absent stored project anchors. New descendants use that resolved project when creating their immutable anchor. No historical body, revision, outgoing link or source key is rewritten; no migration bump (schema 6).
+
+Resolution has a 64-record bound (including starting record and terminal project), per-traversal lookup cache and record-ID cycle detection. It validates explicit anchors along the whole chain rather than stopping at the first one. Contradictions, dangling/invalid references, cycles or depth overflow have no canonical scope and reject new inheritance, even with an explicit project. Historical rows remain readable by key/history/company Log with scope findings; every encountered project can surface a contradiction in focused context. Valid company-wide entries remain supported.
+
+Disposable regressions cover historical null-project parent/child/grandchild and new descendants via both generic creation and journal.log; exact project-context/filtered-Journal visibility; rejected explicit Project B; preservation of historical records/revisions/outgoing links; immutable patch and historical scope undo; ordinary content edit/undo. Separate fixtures cover cycles behind explicit anchors, ancestor contradictions, dangling references, exact 64-record acceptance and overflow rejection, bounded lookup counts and retained historical readback.
+
+Final verification: `npm run build` passed; `npm test` **55 passed, 0 failed, 0 skipped**, using the final rebuilt handler; plugin unittest **6 passed**; `npm run check:web` **0 errors, 0 warnings**; `git diff --check` passed. Five implementation files changed, 159 lines added/12 deleted; no retained tests or files deleted. [Exact file manifest](CHANGED-FILES-PROVENANCE-ISSUE-MIGRATION.txt) includes this commit.
+
+Compatibility limit: historical chains exceeding the traversal bound remain available globally/by key but require a new attributed correction entry with valid scope instead of silent normalization. Full-company focused reads still scan candidate Journals, with traversal cost bounded per record. Release remains blocked pending independent re-review and operational/client/backup/rollback gates. No live files, sensitive copied contents, installed profiles, remote, push, merge or deployment were touched. Earlier sections below are historical.
+
 ## Latest review follow-up: immutable Journal anchors and client identity
 
 Implementation **b3adbca075f2f2816cab173a7ccd741950f07c4d**, based on **452e4a12cefd92ecfe9cf78cb3f85953915bf0da**. This supersedes the older instructions below about repairing Journal scope through link edits: `project_id` and `about_id` are immutable after creation, including absent/historical values. Corrections append a new attributed entry. Core patch validation also covers undo; archive/restore preserves bodies. No migration/version bump: schema remains 6. Ordinary content/citation edits and historical readback remain available.

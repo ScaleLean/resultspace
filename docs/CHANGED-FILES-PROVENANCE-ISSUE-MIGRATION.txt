@@ -47,3 +47,12 @@ test/records.test.ts
 web/routes/c/[slug]/r/[key]/+page.svelte
 
 Follow-up handoff changes only this manifest and docs/HANDOFF-PROVENANCE-ISSUE-MIGRATION.md.
+
+Transitive scope implementation b4102c79ea5be2a8aa0e917619cc076c9a47641b relative to d6d6afc65d619c5d320f752f708e7b9597894e48:
+docs/PROJECT-CLAIM-PROVENANCE.md
+src/core/context.ts
+src/core/records.ts
+test/api.test.ts
+test/journal-scope.test.ts
+
+Following handoff commit updates only this manifest and docs/HANDOFF-PROVENANCE-ISSUE-MIGRATION.md.
