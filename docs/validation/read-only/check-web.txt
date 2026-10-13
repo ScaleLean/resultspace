@@ -1,0 +1,8 @@
+
+> resultspace@0.4.0 check:web
+> cd web && svelte-kit sync && npx -y -p svelte-check@4 -p typescript@6 svelte-check --tsconfig tsconfig.check.json
+
+Loading svelte-check in workspace: /home/chrisguill/.t3/worktrees/resultspace/fix-historical-read-only-mode/web
+Getting Svelte diagnostics...
+
+svelte-check found 0 errors and 0 warnings

@@ -1,0 +1,94 @@
+
+> resultspace@0.4.0 test
+> tsc --noEmit && node --test test/*.test.ts
+
+✔ api: a key reaches its own company and nothing else (79.482814ms)
+✔ api: errors carry a code, roles are enforced, repeats are safe (28.714495ms)
+✔ mcp: the operation list as tools, with the key's rights (16.064615ms)
+✔ log and project context credit a second authenticated editor while preserving the original assertion (23.134057ms)
+✔ canonical Journal scope rejects cross-project about/create/patch and keeps shared claim citations out of another log (70.744778ms)
+✔ Journal scope anchors stay immutable for parent, child and transitive child through patch, undo and restore (153.956636ms)
+✔ historical null-project Journal chains anchor new descendants transitively without rewriting legacy rows (90.345231ms)
+ResultSpace mode: read-write
+ResultSpace mode: read-write
+✔ rs: retained CRUD exposes company scope and server attribution (843.873513ms)
+ResultSpace mode: read-write
+✔ rs: exit codes and the company wall (958.955811ms)
+ResultSpace mode: read-write
+✔ real API + CLI focused project read and sourced record path (666.936449ms)
+ResultSpace mode: read-write
+✔ CLI Journal scope rejects conflicting project/about through log, generic creation and patch (1082.975757ms)
+✔ CLI and API Journal preserve legacy about keys and supply display titles (221.098587ms)
+✔ undo puts a record back and keeps the history (25.812589ms)
+✔ curator briefing, chat, spending limit, and the scheduler (118.673419ms)
+✔ initial model accuracy review is bounded, checkpointed across restart, and respects the spending gate (48.401057ms)
+✔ historical Journal scope detects cycles, ancestor contradictions and depth limits with bounded reads (1142.908884ms)
+✔ focused context, typed facts and contradiction evidence preserve both claims and sourced history (52.925889ms)
+✔ Curator is limited to sourced flags and suggestions; writes never acquire runtime authority (10.978809ms)
+✔ regular evidence Curator detects unsupported and stale claims without a model (11.710503ms)
+✔ company attachments remain immutable, retrievable, and isolated (7.237107ms)
+✔ Journal creation-time pagination survives more than 1000 recently edited older entries (990.414429ms)
+✔ project source inventory includes a fact-only citation once; learning requires evidence and flags retired citations (13.081374ms)
+✔ two actors retain original/value assertion provenance through metadata, citation, dimension edits and undo (39.195013ms)
+✔ schema 2 -> 6 preserves all content and supports backup/restore and rollback (57.004691ms)
+✔ schema 3 -> 6 preserves all content and supports backup/restore and rollback (39.086314ms)
+✔ schema 4 -> 6 preserves all content and supports backup/restore and rollback (34.733214ms)
+✔ migration collision rolls back every schema change and preserves original file (37.910581ms)
+✔ backup captures WAL; restore rejects tampering and refuses existing destinations (16.052756ms)
+✔ directory rehearsal preserves account sessions and Curator databases alongside companies (158.79255ms)
+✔ schema 4 issue/ISS collision: four synthetic historical records survive archive, isolation and rollback (24.744596ms)
+✔ legacy migration derives assertion history and flags contradictory Journal scope without rewriting it (21.802146ms)
+✔ prior disposable schema 5 upgrades to distinct issue_note identity without changing old notes (11.786738ms)
+✔ sign-in: sessions, password change, reset, and the audit log (849.246765ms)
+✔ sign-in: an imported hash still works, and guessing is slowed (269.557899ms)
+ResultSpace mode: read-only (historical reconciliation; writes and Curator disabled)
+✔ read-only: every HTTP and MCP mutation fails without changing any data; authenticated POST reads work (448.93913ms)
+ResultSpace mode: read-only (historical reconciliation; writes and Curator disabled)
+ResultSpace mode: read-only (historical reconciliation; writes and Curator disabled)
+✔ read-only: all web form actions and chat mutations fail, while existing sessions and trusted reads work (712.0211ms)
+ResultSpace mode: read-only (historical reconciliation; writes and Curator disabled)
+✔ read-only: storage, web service, auth and background writers cannot bypass request guards (238.199841ms)
+✔ read-only: flag parsing is explicit, default behavior writes, and old schemas never migrate (5.802207ms)
+ResultSpace mode: read-only (historical reconciliation; writes and Curator disabled)
+ResultSpace mode: read-write
+ResultSpace mode: read-write
+✔ read-only: the environment enables the server and operator guards; disabled and unset retain writes (467.236071ms)
+✔ create gives keys in order and keeps every version (18.912184ms)
+✔ a patch that changes nothing writes nothing (7.285349ms)
+✔ base_rev refuses a write on a record that moved on (7.962793ms)
+✔ a kind checks its title, its statuses and its references (6.4839ms)
+✔ a reference to an archived record is refused, but old ones do not block edits (6.40632ms)
+✔ links: reference fields and cited keys, both directions (7.585705ms)
+✔ search finds words anywhere in a record and skips archived records (7.087247ms)
+✔ the change feed has one entry per revision, in order (5.641155ms)
+✔ isolation: one company's records cannot be read, found or referenced from another (18.342245ms)
+✔ isolation: an agent key works for its own company only (7.635705ms)
+✔ isolation: a company file refuses to open under another company's name (6.089256ms)
+✔ no delete: the file itself refuses to delete records or rewrite history (10.214622ms)
+✔ repeat-safe: the same op id applies once and returns the first outcome (6.83977ms)
+✔ roles: a viewer reads, a member writes records, an admin manages identities (4.980422ms)
+✔ code rules: no `any` in the source (2.762589ms)
+ResultSpace mode: read-write
+✔ trust: loopback and tailnet addresses are told apart from the socket address (1.460198ms)
+ResultSpace mode: read-write
+✔ trust: from this machine the browser is the owner; with trust off it must sign in (96.536488ms)
+ResultSpace mode: read-write
+ResultSpace mode: read-write
+✔ web: nobody signed in is sent to sign in; a wrong password does not sign in (354.292033ms)
+ResultSpace mode: read-write
+✔ web: a form sent by the page's script (use:enhance) still gets its session cookie (151.095701ms)
+ResultSpace mode: read-write
+✔ web: sign-in mode: after the first account, set-up goes on to make the first company (154.374513ms)
+ResultSpace mode: read-write
+✔ web: trusted mode: no sign-in from this machine; set-up makes the company; Admin takes the model key (111.001743ms)
+ResultSpace mode: read-write
+✔ web: authenticated author/read path for projects, facts, learning, issues, evidence and history (321.969662ms)
+✔ web: historical Journal about relations render titles or keys without altering stored data (144.473109ms)
+ℹ tests 62
+ℹ suites 0
+ℹ pass 62
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4224.953855

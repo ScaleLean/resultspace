@@ -27,12 +27,13 @@ export const adminOperations: Operation[] = [
     }),
     run: (ctx, i) => addAgent(ctx.company, i.name, i.role),
   }),
-  // Not a ledger write: the answer holds the key, and the key must be stored nowhere but its hash.
+  // A mutation, but not a ledger write: the answer holds the key, and the key must be stored nowhere but its hash.
   op({
     name: "agent.key",
     summary: "Make a new key for an agent. It is shown once",
     role: "admin",
-    write: false,
+    write: true,
+    ledger: false,
     input: Type.Object({ name: Name }),
     run: (ctx, i) => ({ agent: i.name, key: issueKey(ctx.company, i.name) }),
   }),

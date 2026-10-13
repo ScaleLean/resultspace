@@ -12,6 +12,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { Actor } from "../core/agents.ts";
 import type { Companies } from "../core/companies.ts";
 import type { Company } from "../core/company.ts";
+import { assertWritable } from "../core/read-only.ts";
 import { RsError } from "../core/errors.ts";
 import { reviewEvidence } from "../operations/curator.ts";
 import { changes, history } from "../core/records.ts";
@@ -59,6 +60,7 @@ class CompanyCurator {
   }
 
   static async open(dataDir: string, company: Company, models: ReturnType<typeof createModels>, provider: string): Promise<CompanyCurator> {
+    assertWritable(company.readOnly);
     const tools = operations
       .filter((o) => !HIDDEN.has(o.name) && (!o.write || WRITE_TOOLS.has(o.name)))
       .map((o) =>
@@ -367,7 +369,10 @@ export class Curator {
     this.tz = o.tz ?? process.env.RS_TZ ?? "America/Denver";
     this.briefingHour = o.briefingHour ?? Number(process.env.RS_BRIEFING_HOUR ?? 6);
     this.person = o.person ?? "the owner";
-    if (o.faux) {
+    if (companies.readOnly) {
+      this.provider = "fireworks";
+      this.available = false;
+    } else if (o.faux) {
       this.models.setProvider(o.faux.provider);
       this.provider = "faux";
       this.available = true;
@@ -380,12 +385,14 @@ export class Curator {
 
   /** A model key arrived (first-run setup or Admin): turn the Curator on. */
   enable(): void {
+    assertWritable(this.companies.readOnly);
     if (this.provider !== "fireworks" || !process.env.FIREWORKS_API_KEY) return;
     this.models.setProvider(fireworksProvider());
     this.available = true;
   }
 
   for(slug: string): Promise<CompanyCurator> {
+    assertWritable(this.companies.readOnly);
     let c = this.open_.get(slug);
     if (!c) {
       c = CompanyCurator.open(this.dataDir, this.companies.get(slug), this.models, this.provider);
@@ -397,7 +404,7 @@ export class Curator {
 
   /** One pass over every company: review new writes; once a day, after the briefing hour, upkeep and the briefing. */
   async tick(): Promise<RunReport[]> {
-    if (this.ticking) return [];
+    if (this.companies.readOnly || this.ticking) return [];
     this.ticking = true;
     const out: RunReport[] = [];
     try {
@@ -429,7 +436,7 @@ export class Curator {
 
   /** Run tick() every `seconds`. */
   start(seconds = 60): void {
-    if (this.timer) return;
+    if (this.companies.readOnly || this.timer) return;
     this.timer = setInterval(() => void this.tick(), seconds * 1000);
     this.timer.unref();
   }

@@ -10,7 +10,7 @@ import { handleMcp } from "./mcp.ts";
 
 export const VERSION = "0.4.0";
 const MAX_BODY = 40 * 1024 * 1024; // attachments travel as base64
-const STATUS: Record<ErrorCode, number> = { not_found: 404, forbidden: 403, invalid: 400, conflict: 409 };
+const STATUS: Record<ErrorCode, number> = { not_found: 404, forbidden: 403, invalid: 400, conflict: 409, read_only: 403 };
 
 export type Caller = { company: Company; actor: Actor };
 
@@ -61,7 +61,7 @@ export async function handleApi(companies: Companies, req: IncomingMessage, res:
   const url = new URL(req.url ?? "/", "http://x");
   const p = url.pathname;
   if (p === "/health") {
-    send(res, 200, { ok: true, service: "resultspace", version: VERSION });
+    send(res, 200, { ok: true, service: "resultspace", version: VERSION, readOnly: companies.readOnly });
     return true;
   }
   if (p !== "/mcp" && !p.startsWith("/v1/")) return false;

@@ -1,5 +1,5 @@
 // The ResultSpace server: one process, every company file in DATA_DIR.
-// Run: node src/server.ts   (env: PORT, HOST, DATA_DIR, RS_TRUST=loopback|tailnet|none, FIREWORKS_API_KEY, RS_TZ, RS_BRIEFING_HOUR, RS_CURATOR_AUTO)
+// Run: node src/server.ts   (env: PORT, HOST, DATA_DIR, RS_TRUST=loopback|tailnet|none, FIREWORKS_API_KEY, RS_TZ, RS_BRIEFING_HOUR, RS_CURATOR_AUTO, RS_READ_ONLY)
 // /health, /v1 and /mcp are the API for agents (keys). Everything else is the web app for people (sign-in),
 // built by `npm run build` into build/. The web app reaches data only through req.rs (src/web/service.ts).
 import { existsSync } from "node:fs";
@@ -11,7 +11,8 @@ import { People } from "./core/people.ts";
 import { Curator, type FauxProvider } from "./curator/curator.ts";
 import { loadModelKey } from "./core/modelkey.ts";
 import { parseTrust, trusted, type Trust } from "./core/trust.ts";
-import { handleApi, send } from "./surfaces/http.ts";
+import { handleApi, send, sendError } from "./surfaces/http.ts";
+import { assertWritable, parseReadOnly } from "./core/read-only.ts";
 import { webFor, type WebService } from "./web/service.ts";
 
 export type WebRequest = IncomingMessage & { rs?: WebService };
@@ -32,6 +33,16 @@ function crossSite(req: IncomingMessage): boolean {
   }
 }
 
+// The only read-only web POST action checks a model key without saving it. Require exactly one
+// action selector: SvelteKit otherwise chooses an action from the query, including a write action.
+function webRead(req: IncomingMessage): boolean {
+  if (req.method === "GET" || req.method === "HEAD") return true;
+  if (req.method !== "POST") return false;
+  const url = new URL(req.url ?? "/", "http://x");
+  return (url.pathname === "/setup" || /^\/c\/[a-z0-9][a-z0-9-]{0,62}\/admin$/.test(url.pathname))
+    && url.searchParams.size === 1 && url.searchParams.has("/testKey");
+}
+
 export async function startServer(o: {
   dataDir: string;
   port: number;
@@ -40,11 +51,18 @@ export async function startServer(o: {
   faux?: FauxProvider | undefined;
   webBuild?: string | undefined;
   tick?: number | undefined;
+  readOnly?: boolean | undefined;
 }) {
+  const readOnly = o.readOnly ?? parseReadOnly(process.env.RS_READ_ONLY);
   const trust = o.trust ?? parseTrust(process.env.RS_TRUST);
   if (!o.faux) loadModelKey(o.dataDir);
-  const companies = new Companies(o.dataDir);
-  const people = People.open(o.dataDir);
+  const companies = new Companies(o.dataDir, { readOnly });
+  let people: People;
+  try {
+    // Validate without running upgrades before accepting any requests.
+    if (readOnly) for (const slug of companies.slugs()) companies.get(slug);
+    people = People.open(o.dataDir, { readOnly });
+  } catch (e) { companies.close(); throw e; }
   const curator = new Curator(companies, { dataDir: o.dataDir, faux: o.faux, person: people.list()[0]?.name });
   const kitFile = o.webBuild ?? join(import.meta.dirname, "..", "build", "handler.js");
   // SvelteKit compares a form's Origin with the request's; tell it the scheme the client really used.
@@ -57,6 +75,11 @@ export async function startServer(o: {
     void (async () => {
       try {
         if (await handleApi(companies, req, res)) return;
+        // API/MCP POST reads were handled above; explicitly allow the web read action.
+        if (readOnly && !webRead(req)) {
+          try { assertWritable(readOnly); } catch (e) { sendError(res, e); }
+          return;
+        }
         if (crossSite(req)) return send(res, 403, { error: { code: "forbidden", message: "cross-site request refused" } });
         if (!kit) return send(res, 503, { error: { code: "unavailable", message: "the web app is not built: run `npm run build`" } });
         if (!req.headers["x-forwarded-proto"]) req.headers["x-forwarded-proto"] = "http";
@@ -75,17 +98,19 @@ export async function startServer(o: {
     })();
   });
   if (o.tick) curator.start(o.tick);
-  return new Promise<{ companies: Companies; people: People; curator: Curator; port: number; trust: Trust; close: () => Promise<void> }>(
+  return new Promise<{ companies: Companies; people: People; curator: Curator; port: number; trust: Trust; readOnly: boolean; close: () => Promise<void> }>(
     (ok) => {
       server.listen(o.port, o.host, () => {
         const addr = server.address();
         const port = typeof addr === "object" && addr ? addr.port : o.port;
+        console.log(`ResultSpace mode: ${readOnly ? "read-only (historical reconciliation; writes and Curator disabled)" : "read-write"}`);
         ok({
           companies,
           people,
           curator,
           port,
           trust,
+          readOnly,
           close: async () => {
             await new Promise<void>((done) => {
               server.close(() => done());
@@ -110,7 +135,7 @@ if (import.meta.main) {
     tick: Number(process.env.RS_CURATOR_TICK ?? 60),
   });
   console.log(
-    `ResultSpace on port ${s.port}; trust: ${s.trust}; companies: ${s.companies.slugs().join(", ") || "(none yet)"}; curator: ${s.curator.available ? "on" : "off (no model key)"}`,
+    `ResultSpace on port ${s.port}; trust: ${s.trust}; companies: ${s.companies.slugs().join(", ") || "(none yet)"}; curator: ${s.readOnly ? "disabled (read-only)" : s.curator.available ? "on" : "off (no model key)"}`,
   );
   for (const sig of ["SIGTERM", "SIGINT"] as const) process.once(sig, () => void s.close().then(() => process.exit(0)));
 }

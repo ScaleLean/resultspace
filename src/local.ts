@@ -19,7 +19,7 @@ const dataDir = flag("--data") ?? process.env.RS_DATA_DIR ?? join(process.env.XD
 const host = flag("--host") ?? (argv.includes("--tailnet") ? "0.0.0.0" : "127.0.0.1");
 const s = await startServer({ dataDir, port: Number(flag("--port") ?? process.env.PORT ?? 4390), host, trust: argv.includes("--tailnet") ? "tailnet" : "loopback", tick: 60 });
 const url = `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${s.port}/`;
-console.log(`ResultSpace is running.\n  open:     ${url}\n  data:     ${dataDir}\n  trust:    ${s.trust}${host === "0.0.0.0" ? " (listening on every interface; other addresses must sign in)" : ""}\n  curator:  ${s.curator.available ? "on" : "off until a model key is set in Admin"}\nStop with Ctrl-C.`);
+console.log(`ResultSpace is running.\n  open:     ${url}\n  data:     ${dataDir}\n  trust:    ${s.trust}${host === "0.0.0.0" ? " (listening on every interface; other addresses must sign in)" : ""}\n  mode:     ${s.readOnly ? "read-only" : "read-write"}\n  curator:  ${s.readOnly ? "disabled (read-only)" : s.curator.available ? "on" : "off until a model key is set in Admin"}\nStop with Ctrl-C.`);
 if (!argv.includes("--no-open") && !process.env.CI) {
   const opener = platform() === "darwin" ? "open" : platform() === "win32" ? "start" : "xdg-open";
   spawn(opener, [url], { stdio: "ignore", detached: true, shell: platform() === "win32" }).on("error", () => undefined).unref();

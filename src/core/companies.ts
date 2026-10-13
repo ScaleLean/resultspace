@@ -2,13 +2,17 @@
 import { existsSync, readdirSync } from "node:fs";
 import { agentOfKey, slugOfKey, type Actor } from "./agents.ts";
 import { Company, companyFile, SLUG } from "./company.ts";
+import { assertWritable } from "./read-only.ts";
 import { invalid } from "./errors.ts";
 
 export class Companies {
   private readonly dir: string;
   private readonly open_ = new Map<string, Company>();
 
-  constructor(dir: string) {
+  readonly readOnly: boolean;
+
+  constructor(dir: string, o: { readOnly?: boolean } = {}) {
+    this.readOnly = o.readOnly ?? false;
     this.dir = dir;
   }
 
@@ -20,6 +24,7 @@ export class Companies {
   }
 
   create(slug: string, name: string): Company {
+    assertWritable(this.readOnly);
     if (existsSync(companyFile(this.dir, slug))) throw invalid(`company ${slug} already exists`);
     const co = Company.open(this.dir, slug, { name });
     this.open_.set(slug, co);
@@ -30,7 +35,7 @@ export class Companies {
   get(slug: string): Company {
     const have = this.open_.get(slug);
     if (have) return have;
-    const co = Company.open(this.dir, slug);
+    const co = Company.open(this.dir, slug, undefined, { readOnly: this.readOnly });
     this.open_.set(slug, co);
     return co;
   }

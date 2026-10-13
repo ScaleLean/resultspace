@@ -12,8 +12,10 @@ export type Operation = {
   summary: string;
   /** The lowest role that may call it. */
   role: Role;
-  /** A write is run in one transaction and recorded in the op ledger when the caller gives an op id. */
+  /** A mutation: refused in read-only mode; otherwise run in a transaction. */
   write: boolean;
+  /** Secrets such as newly issued keys must never be saved in the repeat-safe ledger. */
+  ledger?: false;
   input: TSchema;
   run: (ctx: Ctx, input: unknown) => unknown;
 };

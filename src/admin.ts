@@ -11,11 +11,13 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { addAgent, issueKey, listAgents, ROLES, type Role } from "./core/agents.ts";
 import { Companies } from "./core/companies.ts";
+import { parseReadOnly } from "./core/read-only.ts";
 import { People } from "./core/people.ts";
 
 const [group, verb, ...rest] = process.argv.slice(2);
 const dir = process.env.DATA_DIR ?? join(import.meta.dirname, "..", "data");
-const companies = new Companies(dir);
+const readOnly = parseReadOnly(process.env.RS_READ_ONLY);
+const companies = new Companies(dir, { readOnly });
 const need = (v: string | undefined, what: string): string => { if (!v) { console.error(`missing ${what}`); process.exit(2); } return v; };
 try {
   if (group === "company" && verb === "create") { const co = companies.create(need(rest[0], "slug"), need(rest[1], "name")); console.log(`created ${co.slug}`); }
@@ -31,7 +33,7 @@ try {
     writeFileSync(out, `${issueKey(companies.get(need(rest[0], "slug")), need(rest[1], "agent name"))}\n`, { mode: 0o600, flag: "wx" });
     console.log(`key written to ${out}`);
   } else if (group === "person" && (verb === "add" || verb === "reset")) {
-    const people = People.open(dir);
+    const people = People.open(dir, { readOnly });
     try {
       if (verb === "add") {
         const password = (await new Promise<string>((ok) => { let s = ""; process.stdin.on("data", (d) => (s += String(d))).on("end", () => ok(s)); })).replace(/\r?\n$/, "");

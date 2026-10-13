@@ -1,5 +1,6 @@
 // The database the core talks to. Node's built-in SQLite today; the same four calls can be backed by
 // another SQLite host later (a Cloudflare Durable Object, for example) without the core noticing.
+import { assertWritable } from "./read-only.ts";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 
 export type Value = SQLInputValue;
@@ -19,18 +20,21 @@ export interface Db {
 export class NodeDb implements Db {
   private readonly db: DatabaseSync;
   private depth = 0;
+  readonly readOnly: boolean;
 
   constructor(file: string, o: { readOnly?: boolean } = {}) {
-    this.db = new DatabaseSync(file, { readOnly: o.readOnly ?? false });
+    this.readOnly = o.readOnly ?? false;
+    this.db = new DatabaseSync(file, { readOnly: this.readOnly });
     if (!o.readOnly) this.db.exec("pragma journal_mode = wal; pragma synchronous = full; pragma foreign_keys = on; pragma busy_timeout = 5000;");
   }
 
   one<T>(sql: string, ...params: Value[]): T | undefined { return this.db.prepare(sql).get(...params) as T | undefined; }
   all<T>(sql: string, ...params: Value[]): T[] { return this.db.prepare(sql).all(...params) as T[]; }
-  run(sql: string, ...params: Value[]): void { this.db.prepare(sql).run(...params); }
-  exec(sql: string): void { this.db.exec(sql); }
+  run(sql: string, ...params: Value[]): void { assertWritable(this.readOnly); this.db.prepare(sql).run(...params); }
+  exec(sql: string): void { assertWritable(this.readOnly); this.db.exec(sql); }
 
   tx<T>(fn: () => T): T {
+    assertWritable(this.readOnly);
     if (this.depth > 0) return fn();
     this.db.exec("begin immediate");
     this.depth = 1;

@@ -41,6 +41,8 @@ node src/local.ts
 
 Fresh installs use the local owner trust mode. Set `RS_TRUST=none` when sign-in is required. Add API identities and keys in Admin, then configure `rs init --server URL --company SLUG --key-file FILE`. [Local setup](docs/deploy/local.md).
 
+For historical migration reconciliation, `RS_READ_ONLY=1` keeps authenticated reads available and refuses server writes, account/session changes and background Curator work. The default remains read-write; startup and `/health` report the mode. [Activation, access limits and rollback](docs/deploy/READ-ONLY.md).
+
 ## Upgrade and review gate
 
 0.4.0 / schema 6 removes retired operations outright. Upgrade clients and plugin together. Old keys still resolve with `record.get` and `record.history`; retired records appear in a read-only legacy archive. Schemas 2/3/4 migrate directly, preserving bodies, ids, kinds, keys, links, full history, credentials, blobs, counters and operation outcomes. Unknown custom kinds are preserved in that archive. A per-company pre-upgrade SQLite snapshot is created automatically on file opening; it is not a whole-server backup.
