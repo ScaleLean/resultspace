@@ -11,8 +11,7 @@
 //   if (!r.ok) return fail(r.status, { error: r.error });
 //   locals.setCookie.push(r.cookie);
 //   redirect(303, "/");
-import type { Handle } from "@sveltejs/kit/hooks";
-import { error, redirect } from "@sveltejs/kit";
+import { error, redirect, type Handle } from "@sveltejs/kit";
 
 const OPEN = ["/login", "/reset"];
 
@@ -22,13 +21,10 @@ export const handle: Handle = async ({ event, resolve }) => {
   event.locals.rs = rs;
   event.locals.setCookie = [];
   const path = event.url.pathname;
-  if (rs.needsSetup) {
-    if (path !== "/setup") redirect(303, "/setup");
-  } else if (path === "/setup") {
-    if (!rs.person || rs.companies().length > 0) redirect(303, "/");
-  } else if (rs.mode === "trusted") {
-    if (OPEN.includes(path)) redirect(303, "/");
-  } else if (!rs.person && !OPEN.includes(path)) redirect(303, "/login");
+  if (rs.needsSetup) { if (path !== "/setup") redirect(303, "/setup"); }
+  else if (path === "/setup") { if (!rs.person || rs.companies().length > 0) redirect(303, "/"); }
+  else if (rs.mode === "trusted") { if (OPEN.includes(path)) redirect(303, "/"); }
+  else if (!rs.person && !OPEN.includes(path)) redirect(303, "/login");
   const res = await resolve(event);
   const headers = new Headers(res.headers);
   // Every page: no framing, no sniffing, no referrer leaks, HTTPS pinned for a year, no device APIs.

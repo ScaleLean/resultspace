@@ -25,7 +25,7 @@
   .head.strong { font-weight: 600; font-size: 16px; }
   a.head:hover { text-decoration: underline; text-decoration-color: var(--line-2); }
   .rest { all: unset; cursor: pointer; color: var(--dim); font-size: 14px; line-height: 1.45; overflow-wrap: anywhere;
-    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--lines); line-clamp: var(--lines); overflow: hidden; }
-  .rest.open { display: block; -webkit-line-clamp: unset; line-clamp: unset; }
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--lines); overflow: hidden; }
+  .rest.open { display: block; -webkit-line-clamp: unset; }
   .rest:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
 </style>

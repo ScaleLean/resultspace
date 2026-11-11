@@ -1,5 +1,5 @@
 // One error type for everything a caller can get wrong. Surfaces turn `code` into a status.
-export type ErrorCode = "not_found" | "forbidden" | "invalid" | "conflict" | "read_only";
+export type ErrorCode = "not_found" | "forbidden" | "invalid" | "conflict";
 
 export class RsError extends Error {
   readonly code: ErrorCode;

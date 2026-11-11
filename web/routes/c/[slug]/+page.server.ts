@@ -1,9 +1,11 @@
-import { need } from "#lib/server/rs.ts";
-import type { PageServerLoad } from "./$types";
-import type { Rec } from "../../../../src/core/records.ts";
-export const load: PageServerLoad = ({ locals, params }) => ({
-  brief: need(locals.rs.run<{ brief: string }>(params.slug, "company.get")).brief,
-  projects: need(locals.rs.run<Rec[]>(params.slug, "record.list", { kind: "project" })),
-  knowledge: need(locals.rs.run<Rec[]>(params.slug, "record.list", { kind: "knowledge", limit: 5 })),
-  flags: need(locals.rs.run<Rec[]>(params.slug, "record.list", { kind: "flag", status: "open", limit: 5 })),
-});
+import { answer, decide, flag } from "#lib/server/inbox.ts";
+import { _today } from "../../api/c/[slug]/inbox/+server.ts";
+import type { Actions, PageServerLoad } from "./$types";
+
+export const load: PageServerLoad = ({ locals, params }) => _today(locals.rs, params.slug);
+
+export const actions: Actions = {
+  decide: async ({ request, locals, params }) => decide(locals.rs, params.slug, await request.formData()),
+  answer: async ({ request, locals, params }) => answer(locals.rs, params.slug, await request.formData()),
+  flag: async ({ request, locals, params }) => flag(locals.rs, params.slug, await request.formData()),
+};

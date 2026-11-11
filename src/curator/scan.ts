@@ -1,63 +1,41 @@
-// Deterministic candidates with revision-level evidence, never an automatic correction.
+// Upkeep candidates, found by plain queries. The Curator then judges each one. No Pi Durable here.
 import type { Company } from "../core/company.ts";
 import * as records from "../core/records.ts";
-import { evidence, type Evidence } from "../core/context.ts";
+import { ASSIGNMENT_FINAL } from "../core/schema.ts";
+import type { UpkeepFinding } from "./prompts.ts";
 
-export type Finding = { type: string; key: string; title: string; detail: string; evidence: Evidence[]; signature: string };
-const norm = (v: unknown) =>
-  String(v ?? "")
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, " ");
-export function upkeepFindings(co: Company, max = 100): Finding[] {
-  // Query all live claims: correctness must not depend on record.list's pagination cap.
-  const live = co
-    .all<{ id: string }>(
-      `select id from records where archived = 0 and id not in (select record_id from legacy_records)
-    and (kind in ('fact','knowledge','project','issue_note') or (kind = 'entry' and json_extract(body, '$.type') = 'learning')) order by key`,
-    )
-    .map((x) => records.need(co, x.id));
-  const out: Finding[] = [];
-  const add = (type: string, rs: records.Rec[], detail: string) =>
-    out.push({
-      type,
-      key: rs[0]!.key,
-      title: `${type}: ${records.titleOf(co, rs[0]!)}`,
-      detail,
-      evidence: rs.map((r) => evidence(co, r)),
-      signature: `${type}:${rs
-        .flatMap((r) => [r, ...evidence(co, r).sources])
-        .map((r) => `${r.id}@${r.rev}`)
-        .sort()
-        .join(":")}`,
-    });
-  const groups = new Map<string, records.Rec[]>();
-  for (const r of live) {
-    if (r.kind === "fact") {
-      const group = records.stable([norm(r.body.subject), norm(r.body.predicate), norm(r.body.scope), norm(r.body.unit)]);
-      groups.set(group, [...(groups.get(group) ?? []), r]);
-    }
-    if (["fact", "knowledge"].includes(r.kind) || (r.kind === "entry" && r.body.type === "learning")) {
-      const sourced = records.hasCurrentSource(co, r.body) || (r.kind !== "entry" && typeof r.body.url === "string" && r.body.url.trim());
-      if (!sourced) add("unsupported", [r], "No current source is cited. Review this claim before relying on it.");
-      const date = typeof r.body.observed_at === "string" ? r.body.observed_at : r.updated_at;
-      if (Date.parse(date) < Date.now() - 90 * 86400000) add("stale", [r], `Last observation or update ${date}; confirm it still holds.`);
-    }
-    if (
-      ["project", "issue_note"].includes(r.kind) &&
-      !["complete", "resolved", "dismissed", "archived"].includes(String(r.body.status)) &&
-      Date.parse(r.updated_at) < Date.now() - 21 * 86400000
-    )
-      add("stale", [r], `No recorded update since ${r.updated_at}; suggest reviewing current state.`);
+const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+export function upkeepFindings(co: Company, max = 30): UpkeepFinding[] {
+  const out: UpkeepFinding[] = [];
+  const add = (type: string, r: records.Rec, detail: string) => out.push({ type, key: r.key, title: records.titleOf(co, r), detail });
+  const lastResult = new Map<string, string>();
+  for (const r of records.list(co, { kind: "entry", where: { type: "outcome" }, limit: 1000 })) {
+    const p = r.body.project_id;
+    if (typeof p === "string" && (lastResult.get(p) ?? "") < r.created_at) lastResult.set(p, r.created_at);
   }
-  for (const group of groups.values()) {
-    const values = new Set(group.map((r) => records.stable([r.body.value_type, r.body.value])));
-    if (values.size > 1)
-      add(
-        "contradiction",
-        group,
-        "Different values for the same subject, predicate, scope and unit. Both claims remain unchanged; compare their sources and observation dates.",
-      );
+  for (const p of records.list(co, { kind: "project", status: "active", limit: 200 })) {
+    const last = lastResult.get(p.id) ?? p.updated_at;
+    if (last < daysAgo(21)) add("stale project", p, `active, no result since ${last.slice(0, 10)}`);
   }
-  return out.sort((a, b) => (a.type === "contradiction" ? -1 : 0) - (b.type === "contradiction" ? -1 : 0)).slice(0, max);
+  for (const w of records.list(co, { kind: "assignment", limit: 500 })) {
+    const status = String(w.body.status ?? "queued");
+    if (ASSIGNMENT_FINAL.includes(status)) continue;
+    if (status === "queued" && w.updated_at < daysAgo(2)) add("assignment not claimed", w, `waiting for ${String(w.body.owner)} since ${w.updated_at.slice(0, 10)}`);
+    else if (status !== "queued" && w.updated_at < daysAgo(4)) add("assignment stalled", w, `${status} with no change since ${w.updated_at.slice(0, 10)}`);
+  }
+  for (const t of records.list(co, { kind: "task", status: "blocked", limit: 200 }))
+    if (t.updated_at < daysAgo(14)) add("blocked for long", t, `blocked since ${t.updated_at.slice(0, 10)}`);
+  for (const kind of ["task", "project", "knowledge"]) {
+    const seen = new Map<string, records.Rec>();
+    for (const r of records.list(co, { kind, limit: 1000 }).reverse()) {
+      if (kind === "task" && r.body.status === "done") continue;
+      const k = norm(records.titleOf(co, r));
+      if (k.length < 8) continue;
+      const first = seen.get(k);
+      if (first) add("same title", r, `same title as ${first.key}`); else seen.set(k, r);
+    }
+  }
+  return out.slice(0, max);
 }

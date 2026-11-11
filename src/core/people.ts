@@ -5,7 +5,6 @@ import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { Actor } from "./agents.ts";
-import { assertWritable } from "./read-only.ts";
 import { invalid } from "./errors.ts";
 
 export const SESSION_COOKIE = "rs_session";
@@ -70,22 +69,21 @@ export type Done = { ok: true } | { ok: false; error: string };
 export class People {
   private readonly db: DatabaseSync;
 
-  readonly readOnly: boolean;
-  private constructor(db: DatabaseSync, readOnly = false) { this.db = db; this.readOnly = readOnly; }
+  private constructor(db: DatabaseSync) { this.db = db; }
 
-  static open(dir: string, o: { readOnly?: boolean } = {}): People {
-    if (!o.readOnly) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  static open(dir: string): People {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const file = join(dir, "_system.sqlite");
     const fresh = !existsSync(file);
-    const db = new DatabaseSync(file, { readOnly: o.readOnly ?? false });
-    if (!o.readOnly) db.exec("pragma journal_mode = wal; pragma synchronous = full; pragma foreign_keys = on; pragma busy_timeout = 5000;");
-    if (fresh && !o.readOnly) db.exec(DDL);
-    if (!o.readOnly) for (const f of [file, `${file}-wal`, `${file}-shm`]) if (existsSync(f)) chmodSync(f, 0o600);
-    return new People(db, o.readOnly);
+    const db = new DatabaseSync(file);
+    db.exec("pragma journal_mode = wal; pragma synchronous = full; pragma foreign_keys = on; pragma busy_timeout = 5000;");
+    if (fresh) db.exec(DDL);
+    for (const f of [file, `${file}-wal`, `${file}-shm`]) if (existsSync(f)) chmodSync(f, 0o600);
+    return new People(db);
   }
 
   private one<T>(sql: string, ...p: SQLInputValue[]): T | undefined { return this.db.prepare(sql).get(...p) as T | undefined; }
-  private run(sql: string, ...p: SQLInputValue[]): void { assertWritable(this.readOnly); this.db.prepare(sql).run(...p); }
+  private run(sql: string, ...p: SQLInputValue[]): void { this.db.prepare(sql).run(...p); }
   private log(action: string, ok: boolean, person: string | null, ip: string | null, detail: string | null = null): void {
     this.run("insert into audit (at, action, ok, person, ip, detail) values (?, ?, ?, ?, ?, ?)", now(), action, ok ? 1 : 0, person, ip, detail);
   }
@@ -96,7 +94,6 @@ export class People {
 
   /** Add a person with an already-made hash (the importer) or a password. */
   async add(name: string, email: string, secret: { password: string } | { hash: string }): Promise<void> {
-    assertWritable(this.readOnly);
     if (!/^[a-z0-9][a-z0-9._-]{0,62}$/.test(name)) throw invalid(`bad name: ${name}`);
     if (!/^\S+@\S+\.\S+$/.test(email)) throw invalid("that is not an email address");
     if ("password" in secret) { const bad = passwordProblem(secret.password); if (bad) throw invalid(bad); }
@@ -108,7 +105,6 @@ export class People {
 
   /** Sign in with email and password. Returns the session token (the cookie value), or null. */
   async signIn(email: string, password: string, ip: string): Promise<string | null> {
-    assertWritable(this.readOnly);
     const p = this.one<PersonRow>("select * from people where email = ?", email.trim().toLowerCase());
     if (!(await verifyPassword(password, p?.hash)) || !p) { this.log("signin", false, p?.name ?? null, ip); return null; }
     const token = randomBytes(32).toString("hex");
@@ -127,7 +123,6 @@ export class People {
   }
 
   signOut(token: string, ip: string): void {
-    assertWritable(this.readOnly);
     const who = this.session(token);
     this.run("update sessions set revoked_at = ? where token_hash = ? and revoked_at is null", now(), sha(token));
     this.log("signout", true, who?.name ?? null, ip);
@@ -140,7 +135,6 @@ export class People {
 
   /** Change the password of the signed-in person. Every other session ends; this one continues. */
   async changePassword(token: string, current: string, next: string, again: string, ip: string): Promise<Done> {
-    assertWritable(this.readOnly);
     const who = this.session(token);
     if (!who) return { ok: false, error: "Sign in first." };
     const p = this.one<PersonRow>("select * from people where name = ?", who.name)!;
@@ -155,7 +149,6 @@ export class People {
 
   /** Set a person's password outright. Only for a caller already proven to be the owner (a trusted request). */
   async setPasswordOf(name: string, next: string, again: string): Promise<Done> {
-    assertWritable(this.readOnly);
     const bad = passwordProblem(next, again);
     if (bad) return { ok: false, error: bad };
     if (!this.one("select 1 from people where name = ?", name)) return { ok: false, error: `no account ${name}` };
@@ -166,7 +159,6 @@ export class People {
 
   /** A one-time reset token for a person, good for 30 minutes. The operator hands it over; no email is sent. */
   makeReset(email: string): string {
-    assertWritable(this.readOnly);
     const p = this.one<PersonRow>("select * from people where email = ?", email.trim().toLowerCase());
     if (!p) throw invalid(`no account with email ${email}`);
     const token = `rspw_${randomBytes(32).toString("hex")}`;
@@ -176,7 +168,6 @@ export class People {
   }
 
   async useReset(token: string, next: string, again: string, ip: string): Promise<Done> {
-    assertWritable(this.readOnly);
     const r = this.one<{ person: string }>("select person from resets where token_hash = ? and used_at is null and expires_at > ?", sha(token), now());
     if (!r) { this.log("reset_used", false, null, ip); return { ok: false, error: "That reset link is not valid any more. Ask for a new one." }; }
     const bad = passwordProblem(next, again);

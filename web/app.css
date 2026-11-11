@@ -110,12 +110,12 @@ a.row:hover{background:var(--card-2)}.row.big{min-height:64px}
 .row-sub{color:var(--dim);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chip{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:2px 9px;font-size:12px;font-weight:550;color:var(--ink-2);background:var(--hover);white-space:nowrap;text-decoration:none;flex:none;line-height:1.6}
 .chip::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.9;display:none}
-.chip.open,.chip.draft{color:var(--amber);background:var(--amber-bg)}
-.chip.active,.chip.running{color:var(--blue);background:var(--blue-bg)}
-.chip.done,.chip.complete,.chip.resolved,.chip.ok{color:var(--green);background:var(--green-bg)}
-.chip.failed,.chip.error{color:var(--red);background:var(--red-bg)}
-.chip.open::before,.chip.active::before,.chip.failed::before{display:block}
-.chip.dismissed,.chip.archived{color:var(--faint)}
+.chip.open,.chip.needs_permission,.chip.proposed,.chip.planned,.chip.queued,.chip.draft{color:var(--amber);background:var(--amber-bg)}
+.chip.active,.chip.in_progress,.chip.picked_up,.chip.running{color:var(--blue);background:var(--blue-bg)}
+.chip.done,.chip.complete,.chip.approved,.chip.resolved,.chip.ok,.chip.fixed{color:var(--green);background:var(--green-bg)}
+.chip.blocked,.chip.failed,.chip.declined,.chip.error{color:var(--red);background:var(--red-bg)}
+.chip.open::before,.chip.needs_permission::before,.chip.planned::before,.chip.queued::before,.chip.active::before,.chip.in_progress::before,.chip.picked_up::before,.chip.blocked::before,.chip.failed::before{display:block}
+.chip.retired,.chip.cancelled,.chip.dismissed,.chip.archived{color:var(--faint)}
 .filters{display:flex;gap:6px;flex-wrap:wrap;padding:2px 0 12px}
 .filters .chip{min-height:36px;padding:0 13px;font-size:13.5px;font-weight:500;background:transparent;border:1px solid var(--line);color:var(--ink-2)}
 .filters .chip:hover{background:var(--hover)}
@@ -149,4 +149,8 @@ details>summary{cursor:pointer;list-style:none}details>summary::-webkit-details-
 /* console vocabulary (docs/design/UI.md) */
 .label-mono{font:500 10.5px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.live{color:var(--teal)}.quiet{color:var(--faint)}
+.bars{display:flex;align-items:flex-end;gap:3px;height:28px}
+.bars i{flex:1;min-height:2px;background:var(--teal-2);border-radius:1px}
+.bars i.now{background:var(--teal)}
 .rule{border:0;border-top:1px solid var(--line);margin:0}

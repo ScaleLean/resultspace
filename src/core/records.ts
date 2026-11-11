@@ -1,54 +1,87 @@
 // Records of one company: the current version, every past version, links between records, and search.
 // Nothing here deletes. Every change adds one row to `revisions`, in the same transaction as the change.
+import { EVENT_METADATA, REVIEW_FIELDS, legacyReviewCanBind } from "./assertions.ts";
 import { randomBytes } from "node:crypto";
-import { type Role } from "./agents.ts";
+import { listAgents, type Role } from "./agents.ts";
 import type { Company } from "./company.ts";
 import { conflict, forbidden, invalid, notFound } from "./errors.ts";
 import { getKind } from "./kinds.ts";
-import { BUILTIN_KINDS, ENTRY_TYPES, type EntryType, type KindDef } from "./schema.ts";
+import { canonicalKind, LEGACY_FIELDS, type EntryType, type KindDef } from "./schema.ts";
 
 export type Body = Record<string, unknown>;
 export type Rec = {
-  id: string;
-  key: string;
-  kind: string;
-  rev: number;
-  body: Body;
-  archived: boolean;
-  created_at: string;
-  updated_at: string;
-  updated_by: string;
+  id: string; key: string; kind: string; rev: number; body: Body; archived: boolean;
+  created_at: string; updated_at: string; updated_by: string;
+  assertion?: Assertion;
+  assertion_context?: AssertionContext;
 };
 export type Revision = {
-  seq: number;
-  record_id: string;
-  key: string;
-  kind: string;
-  rev: number;
-  body: Body;
-  archived: boolean;
-  changed: string[];
-  op: string;
-  op_id: string | null;
-  actor: string;
-  actor_kind: string;
-  at: string;
-  why: string | null;
+  seq: number; record_id: string; key: string; kind: string; rev: number; body: Body; archived: boolean;
+  changed: string[]; op: string; op_id: string | null; actor: string; actor_kind: string; at: string; why: string | null;
 };
 /** Who is writing. Stored on every revision. */
 export type Who = { name: string; kind: string; role?: Role };
 export type WriteMeta = { why?: string | undefined; opId?: string | undefined };
 
-type RecRow = Omit<Rec, "body" | "archived"> & { body: string; archived: number };
+export type Assertion = {
+  origin_rev: number | null; event_type: string; phase: string | null; payload: Body;
+  actor: string; actor_kind: string; at: string; target_record_id: string | null; target_rev: number | null;
+  correction_of: string | null; binding: "bound" | "legacy_unbound";
+};
+export type HistoricalReview = { evidence_rev: number; target_rev: number | null; verdict: string; actor: string; actor_kind: string; at: string; note: string | null; binding: string };
+export const historicalReviews = (co: Company, id: string): HistoricalReview[] => co.all<HistoricalReview>("select evidence_rev, target_rev, verdict, actor, actor_kind, at, note, binding from historical_reviews where record_id = ? order by evidence_rev", id)
+  .map((r) => r.binding === "bound" && !legacyReviewCanBind(co, id, r.evidence_rev) ? { ...r, target_rev: null, binding: "legacy_unbound" } : r);
+export type AssertionSubject = { key: string; kind: string; title: string; rev: number };
+export type AssertionContext = { original_target: AssertionSubject | null; original_assignment: AssertionSubject | null; original_project: AssertionSubject | null; relinked: string[] };
+function assertionContext(co: Company, id: string, a: Assertion, current: Body): AssertionContext {
+  const seq = a.origin_rev == null ? undefined : co.one<{ seq: number }>("select seq from revisions where record_id = ? and rev = ?", id, a.origin_rev)?.seq;
+  const subject = (ref: unknown, rev?: number | null): AssertionSubject | null => {
+    if (typeof ref !== "string") return null;
+    const r = co.one<{ id: string; key: string; kind: string }>("select id, key, kind from records where id = ? or key = ?", ref.toLowerCase(), ref.toUpperCase());
+    if (!r) return null;
+    const v = rev != null ? co.one<{ rev: number; body: string }>("select rev, body from revisions where record_id = ? and rev = ?", r.id, rev)
+      : seq != null ? co.one<{ rev: number; body: string }>("select rev, body from revisions where record_id = ? and seq <= ? order by seq desc limit 1", r.id, seq) : undefined;
+    if (!v) return null;
+    const b = JSON.parse(v.body) as Body;
+    return { key: r.key, kind: r.kind, title: String(b.title ?? b.name ?? r.key), rev: v.rev };
+  };
+  const original_target = a.target_rev == null ? null : subject(a.target_record_id, a.target_rev);
+  const original_assignment = subject(a.payload.assignment_id ?? a.payload.work_order_id) ?? (original_target?.kind === "assignment" ? original_target : null);
+  const original_project = subject(a.payload.project_id);
+  const refKey = (ref: unknown) => typeof ref === "string" ? co.one<{ key: string }>("select key from records where id = ? or key = ?", ref.toLowerCase(), ref.toUpperCase())?.key ?? ref : null;
+  const relinked = [["about", original_target?.key ?? refKey(a.payload.about_id), refKey(current.about_id)],
+    ["assignment", original_assignment?.key ?? null, refKey(current.assignment_id)], ["project", original_project?.key ?? null, refKey(current.project_id)]]
+    .filter(([, original, now]) => original !== now).map(([field]) => field!);
+  return { original_target, original_assignment, original_project, relinked };
+}
+type RecRow = Omit<Rec, "body" | "archived" | "assertion" | "assertion_context"> & { body: string; archived: number; assertion_json?: string | null };
 type RevRow = Omit<Revision, "body" | "archived" | "changed"> & { body: string; archived: number; changed: string };
 
-const toRec = (r: RecRow): Rec => ({ ...r, body: JSON.parse(r.body) as Body, archived: r.archived === 1 });
-const toRev = (r: RevRow): Revision => ({
-  ...r,
-  body: JSON.parse(r.body) as Body,
-  archived: r.archived === 1,
-  changed: JSON.parse(r.changed) as string[],
-});
+const RECORD_SELECT = `select r.*, case when a.record_id is not null then json_object(
+  'origin_rev', a.origin_rev, 'event_type', a.event_type, 'phase', a.phase, 'payload', json(a.payload),
+  'actor', a.actor, 'actor_kind', a.actor_kind, 'at', a.at, 'target_record_id', a.target_record_id,
+  'target_rev', a.target_rev, 'correction_of', a.correction_of, 'binding', a.binding) end as assertion_json
+  from records r left join journal_assertions a on a.record_id = r.id`;
+const toRec = (co: Company, row: RecRow): Rec => {
+  const { assertion_json, ...r } = row;
+  let body = JSON.parse(r.body) as Body;
+  const assertion = assertion_json ? JSON.parse(assertion_json) as Assertion : undefined;
+  if (assertion) {
+    const metadata = Object.fromEntries(Object.entries(body).filter(([field]) => EVENT_METADATA.has(field)));
+    const immutable = Object.fromEntries(Object.entries(assertion.payload).filter(([field]) => !EVENT_METADATA.has(LEGACY_FIELDS[field] ?? field)));
+    body = { ...immutable, ...metadata, type: assertion.event_type };
+    if (assertion.phase !== null) { body.phase = assertion.phase; body.external_verified = false; }
+  }
+  if (r.kind === "assignment") {
+    for (const f of REVIEW_FIELDS) delete body[f];
+    const review = co.one<HistoricalReview>("select * from historical_reviews where record_id = ? and target_rev = ? and binding = 'bound'", r.id, r.rev);
+    if (review && legacyReviewCanBind(co, r.id, review.evidence_rev)) {
+      body.verification = review.verdict; body.verified_by = review.actor; body.verified_at = review.at; body.verification_note = review.note;
+    }
+  }
+  return { ...r, body, archived: r.archived === 1, ...(assertion ? { assertion, assertion_context: assertionContext(co, r.id, assertion, body) } : {}) };
+};
+const toRev = (r: RevRow): Revision => ({ ...r, body: JSON.parse(r.body) as Body, archived: r.archived === 1, changed: JSON.parse(r.changed) as string[] });
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const KEY_IN_TEXT = /\b[A-Z]{2,6}-N?\d{3,}\b/g;
@@ -56,10 +89,7 @@ const KEY_IN_TEXT = /\b[A-Z]{2,6}-N?\d{3,}\b/g;
 export function uuidv7(): string {
   const b = randomBytes(16);
   let t = BigInt(Date.now());
-  for (let i = 5; i >= 0; i--) {
-    b[i] = Number(t & 255n);
-    t >>= 8n;
-  }
+  for (let i = 5; i >= 0; i--) { b[i] = Number(t & 255n); t >>= 8n; }
   b[6] = (b[6]! & 0x0f) | 0x70;
   b[8] = (b[8]! & 0x3f) | 0x80;
   const h = b.toString("hex");
@@ -71,10 +101,7 @@ export function stable(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
   if (v !== null && typeof v === "object") {
     const o = v as Record<string, unknown>;
-    return `{${Object.keys(o)
-      .sort()
-      .map((k) => `${JSON.stringify(k)}:${stable(o[k])}`)
-      .join(",")}}`;
+    return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${stable(o[k])}`).join(",")}}`;
   }
   return JSON.stringify(v) ?? "null";
 }
@@ -83,12 +110,27 @@ export function changedFields(before: Body, after: Body): string[] {
   return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => stable(before[k]) !== stable(after[k])).sort();
 }
 
+/**
+ * A body with old field names (`work_order_id`) under their new names (`assignment_id`). Giving both with
+ * different values is refused. Used on every write, and on `where` filters, so old callers keep working.
+ */
+export function modernFields<T extends Body>(body: T): T {
+  let out: Body = body;
+  for (const [old, now] of Object.entries(LEGACY_FIELDS)) {
+    if (!(old in out)) continue;
+    if (now in out && stable(out[now]) !== stable(out[old])) throw invalid(`${old} is the old name of ${now}: give one of them`);
+    const { [old]: value, ...rest } = out;
+    out = { ...rest, [now]: value };
+  }
+  return out as T;
+}
+
 // ---- Reads ----
 
 /** A record by id or key (TSK-0007). */
 export function get(co: Company, ref: string): Rec | undefined {
-  const r = co.one<RecRow>("select * from records where id = ? or key = ?", ref.toLowerCase(), ref.toUpperCase());
-  return r ? toRec(r) : undefined;
+  const r = co.one<RecRow>(`${RECORD_SELECT} where r.id = ? or r.key = ?`, ref.toLowerCase(), ref.toUpperCase());
+  return r ? toRec(co, r) : undefined;
 }
 
 export function need(co: Company, ref: string): Rec {
@@ -98,55 +140,52 @@ export function need(co: Company, ref: string): Rec {
 }
 
 export type ListOptions = {
-  kind?: string | undefined;
-  status?: string | undefined;
-  archived?: boolean | "all" | undefined;
-  limit?: number | undefined;
+  kind?: string | undefined; status?: string | undefined; statuses?: string[] | undefined; archived?: boolean | "all" | undefined; limit?: number | undefined;
   /** Top-level body fields that must equal these values. */
   where?: Record<string, string | number | boolean> | undefined;
   /** Only records changed at or after this time (ISO). */
   since?: string | undefined;
+  order?: "oldest" | undefined; after?: string | undefined;
+  assertionSince?: string | undefined; assertionOrder?: boolean | undefined;
+  associatedAssignment?: { id: string; key: string } | undefined;
 };
 
 /** Newest first. Live records only unless `archived` says otherwise. */
 export function list(co: Company, o: ListOptions = {}): Rec[] {
-  const where: string[] = ["id not in (select record_id from legacy_records)"];
+  const where: string[] = [];
   const params: (string | number)[] = [];
-  if (o.kind) {
-    where.push("kind = ?");
-    params.push(o.kind);
+  if (o.kind) { where.push("r.kind = ?"); params.push(canonicalKind(o.kind)); }
+  if (o.status) { where.push("coalesce(json_extract(r.body, '$.status'), 'queued') = ?"); params.push(o.status); }
+  if (o.statuses) { where.push(`coalesce(json_extract(r.body, '$.status'), 'queued') in (${o.statuses.map(() => "?").join(",")})`); params.push(...o.statuses); }
+  if (o.archived !== "all") { where.push("r.archived = ?"); params.push(o.archived ? 1 : 0); }
+  if (o.assertionSince) { where.push("a.at >= ?"); params.push(o.assertionSince); }
+  if (o.associatedAssignment) {
+    where.push("(json_extract(r.body, '$.assignment_id') = ? or a.target_record_id = ? or json_extract(a.payload, '$.assignment_id') in (?, ?) or json_extract(a.payload, '$.work_order_id') in (?, ?))");
+    params.push(o.associatedAssignment.id, o.associatedAssignment.id, o.associatedAssignment.id, o.associatedAssignment.key, o.associatedAssignment.id, o.associatedAssignment.key);
   }
-  if (o.status) {
-    where.push("json_extract(body, '$.status') = ?");
-    params.push(o.status);
-  }
-  if (o.archived !== "all") {
-    where.push("archived = ?");
-    params.push(o.archived ? 1 : 0);
-  }
-  if (o.since) {
-    where.push("updated_at >= ?");
-    params.push(o.since);
-  }
-  for (const [field, value] of Object.entries(o.where ?? {})) {
+  if (o.since) { where.push("r.updated_at >= ?"); params.push(o.since); }
+  for (const [field, value] of Object.entries(modernFields(o.where ?? {}))) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw invalid(`bad field name: ${field}`);
-    where.push(`json_extract(body, '$.${field}') = ?`);
+    const expression = field === "type" ? "coalesce(a.event_type, json_extract(r.body, '$.type'))" : field === "phase" ? "a.phase" : `json_extract(r.body, '$.${field}')`;
+    where.push(`${expression} = ?`);
     params.push(typeof value === "boolean" ? (value ? 1 : 0) : value);
   }
+  if (o.after) {
+    let cursor: unknown;
+    try { cursor = JSON.parse(Buffer.from(o.after, "base64url").toString()); } catch { throw invalid("bad record cursor"); }
+    if (!Array.isArray(cursor) || cursor.length !== 2 || !cursor.every((v) => typeof v === "string")) throw invalid("bad record cursor");
+    const comparison = o.order === "oldest" ? ">" : "<";
+    where.push(`(r.updated_at, r.key) ${comparison} (?, ?)`); params.push(cursor[0]!, cursor[1]!);
+  }
   params.push(Math.min(Math.max(o.limit ?? 100, 1), 1000));
-  return co
-    .all<RecRow>(
-      `select * from records ${where.length ? `where ${where.join(" and ")}` : ""} order by updated_at desc, key desc limit ?`,
-      ...params,
-    )
-    .map(toRec);
+  return co.all<RecRow>(`${RECORD_SELECT} ${where.length ? `where ${where.join(" and ")}` : ""} order by ${o.assertionOrder ? "a.at" : "r.updated_at"} ${o.order === "oldest" ? "asc" : "desc"}, r.key ${o.order === "oldest" ? "asc" : "desc"} limit ?`, ...params).map((r) => toRec(co, r));
 }
 
 export type Hit = { id: string; key: string; kind: string; title: string; snippet: string };
 
 /**
  * Full-text search: every word must appear (a word also matches longer words that start with it). Best match first.
- * Retired records are available by their keys in the legacy archive.
+ * Session entries and old jobs are left out unless asked for by kind: they are noise in an answer.
  */
 export function search(co: Company, q: string, o: { kind?: string | undefined; limit?: number | undefined } = {}): Hit[] {
   const words = q.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
@@ -154,37 +193,28 @@ export function search(co: Company, q: string, o: { kind?: string | undefined; l
   const match = words.map((w) => `"${w}"*`).join(" ");
   return co.all<Hit>(
     `select r.id, r.key, r.kind, f.title, snippet(records_fts, 3, '[', ']', ' … ', 16) as snippet
-     from records_fts f join records r on r.id = f.id
-     where records_fts match ? and r.archived = 0 and r.id not in (select record_id from legacy_records)
-       and (? is null or r.kind = ?)
+     from records_fts f join records r on r.id = f.id left join journal_assertions a on a.record_id = r.id
+     where records_fts match ? and r.archived = 0
+       and (case when ? is null then r.kind <> 'job' and not (r.kind = 'entry' and coalesce(a.event_type, json_extract(r.body, '$.type'), '') = 'session') else r.kind = ? end)
      order by bm25(records_fts, 0, 8.0, 4.0, 1.0) limit ?`,
-    match,
-    o.kind ? o.kind : null,
-    o.kind ? o.kind : null,
-    Math.min(Math.max(o.limit ?? 20, 1), 200),
+    match, o.kind ? canonicalKind(o.kind) : null, o.kind ? canonicalKind(o.kind) : null, Math.min(Math.max(o.limit ?? 20, 1), 200),
   );
 }
 
-const REV_COLUMNS =
-  "v.seq, v.record_id, r.key, r.kind, v.rev, v.body, v.archived, v.changed, v.op, v.op_id, v.actor, v.actor_kind, v.at, v.why";
+const REV_COLUMNS = "v.seq, v.record_id, r.key, r.kind, v.rev, v.body, v.archived, v.changed, v.op, v.op_id, v.actor, v.actor_kind, v.at, v.why";
 
 /** Every version of a record, oldest first. */
 export function history(co: Company, ref: string): Revision[] {
   const r = need(co, ref);
-  return co
-    .all<RevRow>(`select ${REV_COLUMNS} from revisions v join records r on r.id = v.record_id where v.record_id = ? order by v.rev`, r.id)
-    .map(toRev);
+  return co.all<RevRow>(`select ${REV_COLUMNS} from revisions v join records r on r.id = v.record_id where v.record_id = ? order by v.rev`, r.id).map(toRev);
 }
 
 /** The company's change feed: revisions with seq > since, oldest first. */
 export function changes(co: Company, since: number, limit = 200): Revision[] {
-  return co
-    .all<RevRow>(
-      `select ${REV_COLUMNS} from revisions v join records r on r.id = v.record_id where v.seq > ? order by v.seq limit ?`,
-      since,
-      Math.min(Math.max(limit, 1), 5000),
-    )
-    .map(toRev);
+  return co.all<RevRow>(
+    `select ${REV_COLUMNS} from revisions v join records r on r.id = v.record_id where v.seq > ? order by v.seq limit ?`,
+    since, Math.min(Math.max(limit, 1), 5000),
+  ).map(toRev);
 }
 
 export type Link = { key: string; kind: string; title: string; label: string; archived: boolean };
@@ -193,125 +223,34 @@ export type Link = { key: string; kind: string; title: string; label: string; ar
 export function links(co: Company, ref: string): { out: Link[]; in: Link[] } {
   const r = need(co, ref);
   const q = (mine: "from_id" | "to_id", other: "from_id" | "to_id") =>
-    co
-      .all<{ key: string; kind: string; title: string | null; label: string; archived: number }>(
-        `select r.key, r.kind, f.title, l.label, r.archived from links l join records r on r.id = l.${other}
+    co.all<{ key: string; kind: string; title: string | null; label: string; archived: number }>(
+      `select r.key, r.kind, f.title, l.label, r.archived from links l join records r on r.id = l.${other}
        left join records_fts f on f.id = r.id where l.${mine} = ? order by l.label, r.key`,
-        r.id,
-      )
-      .map((x) => ({ key: x.key, kind: x.kind, title: x.title ?? x.key, label: x.label, archived: x.archived === 1 }));
+      r.id,
+    ).map((x) => ({ key: x.key, kind: x.kind, title: x.title ?? x.key, label: x.label, archived: x.archived === 1 }));
   return { out: q("from_id", "to_id"), in: q("to_id", "from_id") };
-}
-
-/** Bound historical scope resolution, including validation behind explicit anchors. */
-export const JOURNAL_SCOPE_MAX_RECORDS = 64;
-
-/** A Journal has one project across its entire about chain; reads never rewrite historical anchors. */
-export function projectScope(co: Company, r: Pick<Rec, "kind" | "body"> & { id?: string }) {
-  const cache = new Map<string, Rec | undefined>();
-  const lookup = (ref: unknown) => {
-    if (typeof ref !== "string" || !ref) return undefined;
-    if (!cache.has(ref)) cache.set(ref, get(co, ref));
-    return cache.get(ref);
-  };
-  const project = (ref: unknown) => {
-    const target = lookup(ref);
-    return target?.kind === "project" ? target.id : null;
-  };
-  const declared = project(r.body.project_id);
-  let inherited: string | null = null;
-  let canonical: string | null = null;
-  let problem: string | null = null;
-  const projects = new Set<string>();
-  const seen = new Set(r.id ? [r.id] : []);
-  let node = r;
-  for (let depth = 0; depth < JOURNAL_SCOPE_MAX_RECORDS; depth++) {
-    const anchor = depth > 0 && node.kind === "project" ? node.id! : project(node.body.project_id);
-    if (anchor) {
-      projects.add(anchor);
-      if (depth > 0 && !inherited) inherited = anchor;
-      if (canonical && canonical !== anchor) problem = "Conflicting historical about/project references";
-      canonical ??= anchor;
-    } else if (node.body.project_id != null) {
-      problem ??= "Unknown historical project reference";
-    }
-    // Continue past explicit anchors to detect conflicting ancestors and cycles.
-    if (node.kind !== "entry" || node.body.about_id == null) break;
-    if (depth + 1 === JOURNAL_SCOPE_MAX_RECORDS) {
-      problem ??= `Journal about chain exceeds ${JOURNAL_SCOPE_MAX_RECORDS} records`;
-      break;
-    }
-    const about = lookup(node.body.about_id);
-    if (!about) { problem ??= "Unknown historical about reference"; break; }
-    if (seen.has(about.id)) { problem ??= "Cycle in historical Journal about chain"; break; }
-    seen.add(about.id);
-    node = about;
-  }
-  return { project_id: problem ? null : canonical, declared, inherited, problem, projects: [...projects] };
-}
-
-/** Current assertion, original record and last edit are distinct facts in append-only history. */
-export function provenance(co: Company, r: Rec) {
-  const versions = history(co, r.id);
-  const first = versions[0]!;
-  const last = versions.at(-1)!;
-  const fields = r.kind === "fact" ? ["subject", "predicate", "value_type", "value", "scope", "unit", "observed_at", "project_id"] :
-    r.kind === "knowledge" ? ["body", "text", "project_id", ...(!r.body.body && !r.body.text ? ["title"] : [])] :
-    r.kind === "entry" ? ["type", "title", "detail", "text", "about_id", "project_id"] : null;
-  const changedLast = (wanted: string[] | null) => wanted === null ? last : versions.reduce((assertion, v, i) =>
-    i === 0 || wanted.some((field) => stable(versions[i - 1]!.body[field]) !== stable(v.body[field])) ? v : assertion, first);
-  const stamp = (v: Revision) => ({ actor: v.actor, actor_kind: v.actor_kind, at: v.at, rev: v.rev, why: v.why });
-  return {
-    provenance: stamp(changedLast(fields)),
-    last_edited: stamp(last),
-    citation_provenance: stamp(changedLast(["source", "source_ids", "url"])),
-    original: { ...stamp(first), body: first.body },
-  };
-}
-
-/** SQL creation order, with canonical scope filtering before any pagination cap. */
-export function journalRecords(co: Company, o: { type?: string | undefined; since?: string | undefined; project?: string | undefined; limit?: number | null | undefined } = {}): Rec[] {
-  const filters = ["kind = 'entry'", "archived = 0", "id not in (select record_id from legacy_records)"];
-  const args: (string | number)[] = [];
-  if (o.type) { filters.push("json_extract(body, '$.type') = ?"); args.push(o.type); }
-  if (o.since) { filters.push("created_at >= ?"); args.push(o.since); }
-  const project = o.project ? need(co, o.project).id : null;
-  const limit = o.limit === undefined ? 50 : o.limit;
-  // Historical rows may lack project_id or conflict with about_id. Resolve with the same core invariant
-  // as writes; no limit is applied before this filter and no stored historical row is rewritten.
-  const rows = co.all<{ id: string }>(`select id from records where ${filters.join(" and ")} order by created_at desc, key desc`, ...args)
-    .map(({ id }) => need(co, id)).filter((r) => !project || projectScope(co, r).project_id === project);
-  return limit === null ? rows : rows.slice(0, limit);
 }
 
 // ---- Writes ----
 
-export const isLegacy = (co: Company, ref: string): boolean =>
-  !!co.one("select 1 from legacy_records where record_id = ?", need(co, ref).id);
-/** A citation is author-provided evidence, never independent verification. */
-export function hasCurrentSource(co: Company, body: Body): boolean {
-  return (
-    !!(typeof body.source === "string" && body.source.trim()) ||
-    (Array.isArray(body.source_ids) &&
-      body.source_ids.some((id) => {
-        const source = typeof id === "string" ? get(co, id) : undefined;
-        return source?.kind === "source" && !source.archived && !isLegacy(co, source.id);
-      }))
-  );
+// Application roles still apply at the core boundary. Assignment owner and links are metadata.
+function memberWriter(who: Who): void {
+  if (who.role === "viewer") throw forbidden("record writes need the member role");
 }
-function writable(co: Company, who: Who, r?: Rec): void {
-  if (who.role === "viewer") throw forbidden("writing needs the member role");
-  if (who.kind === "curator" && r) throw forbidden("Curator never edits claims or existing records");
-  if (r && isLegacy(co, r.id)) throw forbidden(`${r.key} is in the read-only legacy archive; upgrade clients to 0.4.0`);
+
+export const ASSIGNMENT_PROVENANCE = new Set(["reported_by", "reported_at", "answered_by", "verification", "verified_by", "verified_at", "verification_note", "_source", "provenance"]);
+function assignmentFields(fields: string[]): void {
+  if (fields.some((f) => ASSIGNMENT_PROVENANCE.has(f))) throw forbidden("assignment provenance and historical verification are server-controlled");
+}
+function assignmentOwner(co: Company, body: Body): void {
+  const owner = body.owner;
+  if (typeof owner !== "string" || !owner) throw invalid("an assignment needs an owner (an agent's name)");
+  if (owner !== "curator" && !listAgents(co).some((a) => a.name === owner && a.active)) throw invalid(`no active agent ${owner} in this company`);
 }
 
 function nextKey(co: Company, prefix: string): string {
   const n = co.one<{ next_n: number }>("select next_n from key_counters where prefix = ?", prefix)?.next_n ?? 1;
-  co.run(
-    "insert into key_counters (prefix, next_n) values (?, ?) on conflict (prefix) do update set next_n = excluded.next_n",
-    prefix,
-    n + 1,
-  );
+  co.run("insert into key_counters (prefix, next_n) values (?, ?) on conflict (prefix) do update set next_n = excluded.next_n", prefix, n + 1);
   return `${prefix}-${String(n).padStart(4, "0")}`;
 }
 
@@ -325,51 +264,13 @@ function checked(co: Company, kind: KindDef, body: Body, prev: Body | null): Bod
   const title = body[kind.title_field];
   if (touched(kind.title_field) && (typeof title !== "string" || !title.trim())) throw invalid(`${kind.kind} needs a ${kind.title_field}`);
   const status = body.status;
-  if (
-    touched("status") &&
-    kind.statuses &&
-    status !== undefined &&
-    status !== null &&
-    (typeof status !== "string" || !kind.statuses.includes(status))
-  )
+  if (touched("status") && kind.statuses && status !== undefined && status !== null && (typeof status !== "string" || !kind.statuses.includes(status)))
     throw invalid(`status must be one of ${kind.statuses.join(", ")}`);
-  for (const field of ["owner", "assignment_id", "work_order_id", "verification", "verified_by", "permissions", "heartbeat", "dispatch"]) {
-    if (body[field] !== undefined && touched(field))
-      throw invalid(`${field} is retired; planning notes are unassigned and provenance is server-attributed`);
-  }
-  if (kind.kind === "entry" && touched("type") && body.type !== undefined && !ENTRY_TYPES.includes(body.type as EntryType))
-    throw invalid("log type must be outcome, learning or note");
-  if (kind.kind === "entry" && body.type === "learning" && !hasCurrentSource(co, body))
-    throw invalid("Learning needs a source citation or current source_ids; citations are not independent verification");
-  if (kind.kind === "project") {
-    for (const field of ["goal", "current_state"])
-      if (touched(field) && body[field] !== undefined && typeof body[field] !== "string") throw invalid(`${field} must be text`);
-    if (
-      touched("objectives") &&
-      body.objectives !== undefined &&
-      (!Array.isArray(body.objectives) || !body.objectives.every((x) => typeof x === "string"))
-    )
-      throw invalid("objectives must be an array of text");
-  }
-  if (kind.kind === "fact") {
-    for (const field of ["subject", "predicate"])
-      if (typeof body[field] !== "string" || !body[field].trim()) throw invalid(`fact needs ${field}`);
-    const types: Record<string, string> = { text: "string", number: "number", boolean: "boolean" };
-    if (
-      !types[String(body.value_type)] ||
-      typeof body.value !== types[String(body.value_type)] ||
-      (typeof body.value === "number" && !Number.isFinite(body.value))
-    )
-      throw invalid("fact value must match value_type: text, number or boolean");
-    for (const field of ["scope", "unit", "source", "observed_at"])
-      if (body[field] !== undefined && typeof body[field] !== "string") throw invalid(`${field} must be text`);
-    if (body.observed_at !== undefined && !Number.isFinite(Date.parse(String(body.observed_at))))
-      throw invalid("observed_at must be a date");
-  }
   const out: Body = { ...body };
   const resolve = (field: string, value: unknown): unknown => {
-    if (typeof value !== "string" || !value) return value;
     const declared = field in kind.refs || field.replace(/_ids$/, "_id") in kind.refs;
+    if (declared && value !== null && (typeof value !== "string" || !value)) throw invalid(`${field}: expected a record reference`);
+    if (typeof value !== "string" || !value) return value;
     const target = get(co, value);
     if (!target) {
       if (declared) throw invalid(`${field}: no record ${value} in this company`);
@@ -378,49 +279,22 @@ function checked(co: Company, kind: KindDef, body: Body, prev: Body | null): Bod
     if (declared) {
       const want = kind.refs[field] ?? kind.refs[field.replace(/_ids$/, "_id")] ?? null;
       if (want && target.kind !== want) throw invalid(`${field} must point at a ${want}, ${target.key} is a ${target.kind}`);
-      if (isLegacy(co, target.id)) throw invalid(`${field}: ${target.key} is in the legacy archive`);
       if (target.archived) throw invalid(`${field}: ${target.key} is archived`);
     }
     return target.id;
   };
   for (const [field, value] of Object.entries(body)) {
     if (prev && stable(prev[field]) === stable(value)) continue;
-    if (field in kind.refs && value !== null && value !== undefined) {
-      if (
-        field.endsWith("_ids")
-          ? !Array.isArray(value) || !value.every((v) => typeof v === "string" && v)
-          : typeof value !== "string" || !value
-      )
-        throw invalid(`${field}: expected record reference${field.endsWith("_ids") ? " array" : ""}`);
-    }
     if (field.endsWith("_id")) out[field] = resolve(field, value);
     else if (field.endsWith("_ids") && Array.isArray(value)) out[field] = value.map((v) => resolve(field, v));
-  }
-  if (kind.kind === "entry") {
-    if (prev) {
-      // Scope anchors are fixed at creation, including absent or historical anchors.
-      // Undo uses this same validation; archive/restore never changes the body.
-      for (const field of ["project_id", "about_id"])
-        if (stable(prev[field]) !== stable(out[field]))
-          throw invalid(`Journal ${field} is immutable after creation; append a new attributed correction entry`);
-    } else {
-      const scope = projectScope(co, { kind: "entry", body: out });
-      if (scope.problem) throw invalid(`Cannot resolve Journal project scope: ${scope.problem}`);
-      if (!out.project_id && scope.inherited) {
-        const project = need(co, scope.inherited);
-        if (project.archived || isLegacy(co, project.id)) throw invalid("Journal project is archived or legacy");
-        out.project_id = scope.inherited;
-      }
-    }
   }
   return out;
 }
 
 /** The words of a body, for search and for finding cited keys. Bookkeeping (`_source`...) and bare ids are left out. */
 function strings(v: unknown, out: string[] = []): string[] {
-  if (typeof v === "string") {
-    if (!UUID.test(v)) out.push(v);
-  } else if (Array.isArray(v)) for (const x of v) strings(x, out);
+  if (typeof v === "string") { if (!UUID.test(v)) out.push(v); }
+  else if (Array.isArray(v)) for (const x of v) strings(x, out);
   else if (v !== null && typeof v === "object") for (const [k, x] of Object.entries(v)) if (!k.startsWith("_")) strings(x, out);
   return out;
 }
@@ -429,19 +303,12 @@ function strings(v: unknown, out: string[] = []): string[] {
 export function index(co: Company, r: Rec, kind: KindDef): void {
   const text = strings(r.body);
   co.run("delete from records_fts where id = ?", r.id);
-  co.run(
-    "insert into records_fts (id, key, title, body) values (?, ?, ?, ?)",
-    r.id,
-    r.key,
-    String(r.body[kind.title_field] ?? r.key),
-    text.join("\n"),
-  );
+  co.run("insert into records_fts (id, key, title, body) values (?, ?, ?, ?)", r.id, r.key, String(r.body[kind.title_field] ?? r.key), text.join("\n"));
   co.run("delete from links where from_id = ?", r.id);
   const add = (to: string | undefined, label: string) => {
     if (to && to !== r.id) co.run("insert or ignore into links (from_id, to_id, label) values (?, ?, ?)", r.id, to, label);
   };
-  const idOf = (v: unknown) =>
-    typeof v === "string" && UUID.test(v) ? co.one<{ id: string }>("select id from records where id = ?", v)?.id : undefined;
+  const idOf = (v: unknown) => (typeof v === "string" && UUID.test(v) ? co.one<{ id: string }>("select id from records where id = ?", v)?.id : undefined);
   for (const [field, value] of Object.entries(r.body)) {
     if (field.endsWith("_id")) add(idOf(value), field.slice(0, -3));
     else if (field.endsWith("_ids") && Array.isArray(value)) for (const v of value) add(idOf(v), field.slice(0, -4));
@@ -451,71 +318,52 @@ export function index(co: Company, r: Rec, kind: KindDef): void {
 }
 
 function store(co: Company, r: Rec, kind: KindDef, op: string, changed: string[], who: Who, m: WriteMeta, fresh: boolean): Rec {
-  const body = JSON.stringify(r.body);
+  const storedBody = { ...r.body };
+  if (r.kind === "assignment") for (const field of REVIEW_FIELDS) delete storedBody[field];
+  if (!fresh && r.kind === "assignment") changed = [...new Set([...changed, ...REVIEW_FIELDS.filter((f) => f in r.body)])].sort();
+  const body = JSON.stringify(storedBody);
   if (fresh)
-    co.run(
-      "insert into records (id, key, kind, rev, body, archived, created_at, updated_at, updated_by) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      r.id,
-      r.key,
-      r.kind,
-      r.rev,
-      body,
-      r.archived ? 1 : 0,
-      r.created_at,
-      r.updated_at,
-      r.updated_by,
-    );
+    co.run("insert into records (id, key, kind, rev, body, archived, created_at, updated_at, updated_by) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      r.id, r.key, r.kind, r.rev, body, r.archived ? 1 : 0, r.created_at, r.updated_at, r.updated_by);
   else
-    co.run(
-      "update records set rev = ?, body = ?, archived = ?, updated_at = ?, updated_by = ? where id = ?",
-      r.rev,
-      body,
-      r.archived ? 1 : 0,
-      r.updated_at,
-      r.updated_by,
-      r.id,
-    );
-  co.run(
-    "insert into revisions (record_id, rev, body, archived, changed, op, op_id, actor, actor_kind, at, why) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    r.id,
-    r.rev,
-    body,
-    r.archived ? 1 : 0,
-    JSON.stringify(changed),
-    op,
-    m.opId ?? null,
-    who.name,
-    who.kind,
-    r.updated_at,
-    m.why ?? null,
-  );
-  index(co, r, kind);
-  return r;
+    co.run("update records set rev = ?, body = ?, archived = ?, updated_at = ?, updated_by = ? where id = ?",
+      r.rev, body, r.archived ? 1 : 0, r.updated_at, r.updated_by, r.id);
+  co.run("insert into revisions (record_id, rev, body, archived, changed, op, op_id, actor, actor_kind, at, why) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    r.id, r.rev, body, r.archived ? 1 : 0, JSON.stringify(changed), op, m.opId ?? null, who.name, who.kind, r.updated_at, m.why ?? null);
+  if (fresh && r.kind === "entry") {
+    const type = String(r.body.type ?? "note");
+    const phase = type === "action" ? (r.body.phase === "attempted" ? "attempted" : r.body.phase === "reported" ? "reported" : "unknown") : null;
+    const target = typeof r.body.about_id === "string" ? get(co, r.body.about_id) : undefined;
+    const correction = typeof r.body.correction_of === "string" ? need(co, r.body.correction_of) : undefined;
+    if (correction && !correction.assertion) throw invalid("a correction must reference a Journal assertion in this company");
+    co.run("insert into journal_assertions values (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'bound')", r.id, type, phase, JSON.stringify(r.body), who.name, who.kind, r.created_at, target?.id ?? null, target?.rev ?? null, correction?.id ?? null);
+  }
+  const projected = need(co, r.id);
+  index(co, projected, kind);
+  return projected;
 }
 
 export function create(co: Company, who: Who, kindName: string, body: Body, m: WriteMeta = {}): Rec {
   return co.tx(() => {
+    memberWriter(who);
     const kind = getKind(co, kindName);
     if (!kind) throw invalid(`unknown kind: ${kindName}`);
-    writable(co, who);
-    if (who.kind === "curator" && !["flag", "briefing"].includes(kind.kind)) throw forbidden("Curator can only flag and suggest");
-    if (!BUILTIN_KINDS.some((k) => k.kind === kind.kind))
-      throw forbidden(`${kind.kind} was retired in 0.4.0; use project, fact, knowledge, log or issue notes`);
-    const clean = checked(co, kind, body, null);
+    let normalized = modernFields(body);
+    if (kind.kind === "entry") {
+      if (["reviewed_rev", "target_rev", "origin_rev", "original_actor", "original_at", "binding", "actor", "actor_kind", "at", "target_record_id", "assertion", "payload"].some((f) => f in normalized)) throw invalid("assertion provenance is server-controlled");
+      normalized = { type: "note", ...normalized };
+      if (normalized.type === "action") normalized = { ...normalized, phase: normalized.phase === "attempted" || normalized.phase === "reported" ? normalized.phase : "unknown", external_verified: false };
+    }
+    if (kind.kind === "assignment") {
+      assignmentFields(Object.keys(normalized));
+      assignmentOwner(co, normalized);
+      normalized = { status: "queued", ...normalized };
+      if (normalized.result !== undefined && normalized.result !== null) normalized = { ...normalized, reported_by: who.name, reported_at: new Date().toISOString() };
+    }
+    const clean = checked(co, kind, normalized, null);
     const at = new Date().toISOString();
-    const r: Rec = {
-      id: uuidv7(),
-      key: nextKey(co, kind.prefix),
-      kind: kind.kind,
-      rev: 1,
-      body: clean,
-      archived: false,
-      created_at: at,
-      updated_at: at,
-      updated_by: who.name,
-    };
-    store(co, r, kind, "create", changedFields({}, clean), who, m, true);
-    return r;
+    const r: Rec = { id: uuidv7(), key: nextKey(co, kind.prefix), kind: kind.kind, rev: 1, body: clean, archived: false, created_at: at, updated_at: at, updated_by: who.name };
+    return store(co, r, kind, "create", changedFields({}, clean), who, m, true);
   });
 }
 
@@ -524,29 +372,35 @@ export function create(co: Company, who: Who, kindName: string, body: Body, m: W
  * record has moved on since that revision. A patch that changes nothing writes nothing.
  */
 export function patch(co: Company, who: Who, ref: string, set: Body, m: WriteMeta & { baseRev?: number | undefined } = {}): Rec {
+  return patchRecord(co, who, ref, set, m, false);
+}
+
+/** Internal write path for assignment handlers, after their transition checks. */
+export function patchAssignment(co: Company, who: Who, ref: string, set: Body, m: WriteMeta = {}): Rec {
+  return patchRecord(co, who, ref, set, m, true);
+}
+
+function patchRecord(co: Company, who: Who, ref: string, set: Body, m: WriteMeta & { baseRev?: number | undefined }, lifecycle: boolean): Rec {
   return co.tx(() => {
     const cur = need(co, ref);
-    writable(co, who, cur);
-    const normalized = set;
-    if (m.baseRev !== undefined && m.baseRev !== cur.rev)
-      throw conflict(`${cur.key} is at revision ${cur.rev}, not ${m.baseRev}: read it again`);
+    memberWriter(who);
+    const normalized = modernFields(set);
+    if (cur.assertion && Object.keys(normalized).some((f) => !EVENT_METADATA.has(f)))
+      throw invalid("Journal assertion fields are immutable; append a correction with journal.correct (metadata lives under metadata)");
+    if (lifecycle && cur.kind !== "assignment") throw invalid(`${cur.key} is not an assignment`);
+    if (cur.kind === "assignment") {
+      if (cur.archived) throw invalid(`${cur.key} is archived: restore it first`);
+      if (!lifecycle) assignmentFields(Object.keys(normalized));
+    }
+    if (m.baseRev !== undefined && m.baseRev !== cur.rev) throw conflict(`${cur.key} is at revision ${cur.rev}, not ${m.baseRev}: read it again`);
     const kind = getKind(co, cur.kind)!;
     const next: Body = { ...cur.body };
-    for (const [k, v] of Object.entries(normalized)) {
-      if (v === null) delete next[k];
-      else next[k] = v;
+    for (const [k, v] of Object.entries(normalized)) { if (v === null) delete next[k]; else next[k] = v; }
+    if (cur.kind === "assignment" && "owner" in normalized) assignmentOwner(co, next);
+    if (cur.kind === "assignment" && stable(next.result) !== stable(cur.body.result)) {
+      next.reported_by = who.name; next.reported_at = new Date().toISOString();
     }
     const clean = checked(co, kind, next, cur.body);
-    if (cur.kind !== "entry" && "project_id" in kind.refs && stable(cur.body.project_id) !== stable(clean.project_id)) {
-      const nextProject = projectScope(co, { kind: cur.kind, body: clean }).project_id;
-      const dependents = co.all<{ id: string }>("select id from records where kind = 'entry' and id not in (select record_id from legacy_records) and json_extract(body, '$.about_id') in (?, ?)", cur.id, cur.key);
-      for (const { id } of dependents) {
-        const entry = need(co, id);
-        const declared = projectScope(co, entry).declared;
-        if (declared && nextProject && declared !== nextProject)
-          throw invalid(`${cur.key}: project change conflicts with Journal ${entry.key}; append a corrected claim and Journal entry instead`);
-      }
-    }
     const changed = changedFields(cur.body, clean);
     if (!changed.length) return cur;
     const r: Rec = { ...cur, rev: cur.rev + 1, body: clean, updated_at: new Date().toISOString(), updated_by: who.name };
@@ -558,7 +412,7 @@ export function patch(co: Company, who: Who, ref: string, set: Body, m: WriteMet
 export function setArchived(co: Company, who: Who, ref: string, archived: boolean, m: WriteMeta = {}): Rec {
   return co.tx(() => {
     const cur = need(co, ref);
-    writable(co, who, cur);
+    memberWriter(who);
     if (cur.archived === archived) return cur;
     const r: Rec = { ...cur, rev: cur.rev + 1, archived, updated_at: new Date().toISOString(), updated_by: who.name };
     return store(co, r, getKind(co, cur.kind)!, archived ? "archive" : "restore", ["archived"], who, m, false);
@@ -573,18 +427,17 @@ export function titleOf(co: Company, r: Rec): string {
 
 /**
  * Write a Journal entry: what happened. `about` is the record it is about, when there is one; the entry
- * joins that record's project (or the record itself when it is a project).
+ * joins that record's project (or the record itself when it is a project) and assignment.
  */
-export function logEntry(
-  co: Company,
-  who: Who,
-  type: EntryType,
-  text: string,
-  about: Rec | null,
-  m: WriteMeta = {},
-  extra: Body = {},
-): Rec {
-  const body: Body = { type, title: text.trim().slice(0, 300), ...extra };
-  if (about) body.about_id = about.id;
+export function logEntry(co: Company, who: Who, type: EntryType, text: string, about: Rec | null, m: WriteMeta = {}, extra: Body = {}): Rec {
+  const body: Body = { type, title: text.trim().slice(0, 300), ...modernFields(extra) };
+  if (about) {
+    body.about_id = about.id;
+    if (about.kind === "project") body.project_id ??= about.id;
+    else if (typeof about.body.project_id === "string" && get(co, about.body.project_id)?.kind === "project") body.project_id ??= about.body.project_id;
+    if (about.kind === "assignment") body.assignment_id ??= about.id;
+  }
+  delete body.reviewed_rev; // The immutable target snapshot is resolved by the server at creation.
+  for (const f of ["project_id", "assignment_id"]) if (typeof body[f] === "string" && get(co, body[f])?.archived) delete body[f];
   return create(co, who, "entry", body, m);
 }

@@ -1,192 +1,225 @@
+// Read views built from records: the brief an agent starts a session with, results, activity, today.
+import { invalid } from "../core/errors.ts";
 import { Type } from "typebox";
-import * as records from "../core/records.ts";
 import type { Company } from "../core/company.ts";
-import { projectContext } from "../core/context.ts";
+import * as records from "../core/records.ts";
+import { ENTRY_TYPES, ASSIGNMENT_OPEN } from "../core/schema.ts";
 import { Limit, meta, op, Ref, sinceTime, who, type Operation } from "./define.ts";
+import { assignmentOf, openAssignments, assignmentCursor, STATUS_WORDS } from "./assignments.ts";
+
 export const WRITING_RULES = [
-  "State what changed or what you learned.",
-  "Cite sources and distinguish observations from assumptions.",
-  "Keep project state and planning notes clear and brief.",
+  "Put the result first: what changed or what is now true, not the effort.",
+  "Keep sentences short: 20 words for an instruction, 25 for a description.",
+  "Use the active voice and simple tenses. Write \"we sent\", not \"has been sent\".",
+  "Write one instruction per sentence. Put a condition first: \"If X, do Y.\"",
+  "Delete hedges and filler (should, may, could, in order to, leverage, robust).",
 ];
-export const companyRecord = (co: Company) => records.list(co, { kind: "company", limit: 1 })[0];
-export function briefText(co: Company, _agent: string | null, budget = 4000): string {
-  const projects = records.list(co, { kind: "project", limit: 20 });
-  return [
-    `## ${co.name} (${co.slug})`,
-    String(companyRecord(co)?.body.brief ?? ""),
-    "Projects:",
-    ...projects.map((r) => `${r.key} ${records.titleOf(co, r)}: ${String(r.body.current_state ?? "")}`),
-    "Read focused context with rs project context KEY. Read facts and sources before acting. Work with your own runtime and tools, then record sourced learning or outcome. ResultSpace stores knowledge and planning notes; it does not execute or authorize work.",
-    ...WRITING_RULES,
-  ]
-    .join("\n")
-    .slice(0, budget);
+const STANDING = "Assignments: `rs assignment next`, report with `rs assignment report <KEY> --result \"outcome\"` (a report is your word; "
+  + "members can add review notes). Outward actions (spend, ads, publish, email/message customers, prices, store settings, deploy) need no permission: "
+  + "record each one with `rs act <action> --detail \"…\" [--amount N --unit $]` so a person sees it.";
+
+/** The company's own record (kind `company`), if it has one. Its `brief` field is what agents read first. */
+export const companyRecord = (co: Company): records.Rec | undefined => records.list(co, { kind: "company", limit: 1 })[0];
+
+const key = (co: Company, id: unknown): string | null => (typeof id === "string" ? (records.get(co, id)?.key ?? null) : null);
+
+export function briefText(co: Company, agent: string | null, budget = 4000): string {
+  const lines = [`## ${co.name} (${co.slug})`];
+  const brief = companyRecord(co)?.body.brief;
+  // The company's own words get at most 40% of the room, so goals and assignments always fit.
+  const room40 = Math.floor(Math.max(500, budget) * 0.4);
+  if (typeof brief === "string" && brief.trim()) lines.push(brief.trim().length > room40 ? `${brief.trim().slice(0, room40).trimEnd()} … (more: rs show ${companyRecord(co)?.key})` : brief.trim());
+  const decisions = records.list(co, { kind: "decision", limit: 5 });
+  if (decisions.length) lines.push("Decisions (newest first):", ...decisions.map((r) => `- ${r.key} ${records.titleOf(co, r)}${typeof r.body.choice === "string" && r.body.choice ? ` → ${r.body.choice}` : ""}`));
+  const goals = records.list(co, { kind: "goal", status: "active", limit: 8 }).sort((a, b) => (a.key < b.key ? -1 : 1));
+  if (goals.length) lines.push("Active goals:", ...goals.map((r) => `- ${r.key} ${records.titleOf(co, r)}`));
+  const projects = records.list(co, { kind: "project", status: "active", limit: 12 }).sort((a, b) => (a.key < b.key ? -1 : 1));
+  if (projects.length) lines.push("Active projects:", ...projects.map((r) => `- ${r.key} ${records.titleOf(co, r)}${key(co, r.body.goal_id) ? ` (${key(co, r.body.goal_id)})` : ""}`));
+  const open = openAssignments(co, agent ?? undefined).slice(0, 8);
+  if (open.length) lines.push(agent ? "Your open assignments:" : "Open assignments:", ...open.map((r) => `- ${r.key} [${STATUS_WORDS[String(r.body.status ?? "queued")] ?? r.body.status}] ${records.titleOf(co, r)}`));
+  lines.push("Write in clear English (the Curator checks agent text):", ...WRITING_RULES.map((r) => `- ${r}`));
+  let text = lines.join("\n");
+  const room = Math.max(500, budget) - STANDING.length - 60;
+  if (text.length > room) text = `${text.slice(0, room).trimEnd()}\n(… trimmed; \`rs brief\` for the rest)`;
+  return `${text}\n\n${STANDING}`;
 }
-export function journalItems(
-  co: Company,
-  o: { type?: string | undefined; since?: string | undefined; limit?: number | undefined; project?: string | undefined } = {},
-) {
-  return records.journalRecords(co, { ...o, since: o.since ? sinceTime(o.since, 24) : undefined }).map((r) => {
-    const history = records.history(co, r.id);
-    const first = history[0]!;
-    const last = history.at(-1)!;
-    const scope = records.projectScope(co, r);
-    const about = typeof r.body.about_id === "string" ? records.get(co, r.body.about_id) : undefined;
-    return {
-      key: r.key,
-      type: String(r.body.type ?? "note"),
-      at: r.created_at,
-      by: last.actor,
-      rev: last.rev,
-      updated_at: last.at,
-      original: {
-        actor: first.actor,
-        actor_kind: first.actor_kind,
-        at: first.at,
-        rev: first.rev,
-        body: first.body,
-      },
-      title: records.titleOf(co, r),
-      detail: r.body.detail ?? r.body.text ?? null,
-      source: r.body.source ?? null,
-      source_ids: r.body.source_ids ?? [],
-      claim_provenance: records.provenance(co, r).provenance,
-      project_scope: scope,
-      project: scope.project_id ? records.need(co, scope.project_id).key : null,
-      about: about ? { ...about, title: records.titleOf(co, about) } : null,
-    };
-  });
+
+export type JournalItem = { key: string; type: string; at: string; by: string; title: string; detail: unknown; action: unknown; amount: unknown; unit: unknown; phase: string | null; external_verified: false;
+  assertion?: records.Assertion; assertion_context?: records.AssertionContext;
+  about: { key: string; kind: string; title: string } | null; project: string | null; assignment: string | null;
+  /** Old name of `assignment`, kept for readers written before schema 3. */
+  work_order: string | null };
+
+export function journalItems(co: Company, o: { type?: string | undefined; since?: string | undefined; limit?: number | undefined; project?: string | undefined } = {}): JournalItem[] {
+  const project = o.project ? records.need(co, o.project).id : undefined;
+  const where: Record<string, string> = {};
+  if (project) where.project_id = project;
+  if (o.type) where.type = o.type;
+  return records.list(co, { kind: "entry", limit: o.limit ?? 50, where, assertionSince: o.since, assertionOrder: true })
+    .map((r) => {
+      const about = typeof r.body.about_id === "string" ? records.get(co, r.body.about_id) : undefined;
+      return {
+        key: r.key, assertion: r.assertion, assertion_context: r.assertion_context, type: r.assertion?.event_type ?? "unknown", at: r.assertion?.at ?? r.created_at, by: r.assertion?.actor ?? "unknown", title: String(r.assertion?.payload.title ?? records.titleOf(co, r)), detail: r.assertion?.payload.detail ?? r.assertion?.payload.text ?? null,
+        phase: r.assertion?.phase ?? null, external_verified: false as const,
+        action: r.body.action ?? null, amount: r.body.amount ?? null, unit: r.body.unit ?? null,
+        about: about ? { key: about.key, kind: about.kind, title: records.titleOf(co, about) } : null,
+        project: key(co, r.body.project_id), assignment: key(co, r.body.assignment_id), work_order: key(co, r.body.assignment_id),
+      };
+    });
 }
-export type JournalItem = ReturnType<typeof journalItems>[number];
+
 export function activityItems(co: Company, since: string, limit: number) {
-  return co
-    .all<{
-      seq: number;
-      at: string;
-      actor: string;
-      actor_kind: string;
-      key: string;
-      kind: string;
-      title: string | null;
-      op: string;
-      changed: string;
-      why: string | null;
-    }>(
-      `select v.seq,v.at,v.actor,v.actor_kind,r.key,r.kind,f.title,v.op,v.changed,v.why from revisions v
-   join records r on r.id=v.record_id left join records_fts f on f.id=r.id where v.at>=? order by v.seq desc limit ?`,
-      since,
-      limit,
-    )
-    .map((r) => ({ ...r, title: r.title ?? r.key, changed: JSON.parse(r.changed) as string[] }));
+  return co.all<{ seq: number; at: string; actor: string; actor_kind: string; key: string; kind: string; title: string | null; op: string; changed: string; why: string | null }>(
+    `select v.seq, v.at, v.actor, v.actor_kind, r.key, r.kind, f.title, v.op, v.changed, v.why
+     from revisions v join records r on r.id = v.record_id left join records_fts f on f.id = r.id
+     where v.at >= ? order by v.seq desc limit ?`, since, limit,
+  ).map((x) => ({ ...x, title: x.title ?? x.key, changed: JSON.parse(x.changed) as string[] }));
 }
+
+/** A raw command or tool call logged as an action ("ads API: cd ~/x; cat > y.py <<EOF ..."): machine work, not news. */
+export const isMachine = (title: string): boolean =>
+  /(^|[\s;:])(cd|cat|grep|python3?|bash|curl|sed|ls|mkdir|export|source)\s|<<|\$\(|~\/|&&|\|\s*\w/.test(title);
+
+/** Minutes of work in a list of times: gaps under 30 minutes count, longer gaps are breaks. */
+function workedMinutes(times: string[]): number {
+  const t = times.map((s) => Date.parse(s)).filter(Number.isFinite).sort((a, b) => a - b);
+  let ms = 0;
+  for (let i = 1; i < t.length; i++) { const gap = t[i]! - t[i - 1]!; if (gap < 30 * 60_000) ms += gap; }
+  return Math.round(ms / 60_000);
+}
+
+export type Pulse = {
+  slug: string; name: string; needs: number; last_at: string | null;
+  agent: { name: string; last_seen: string | null; working: boolean } | null;
+  focus: string | null;
+  day: { entries: number; sessions: number; failed: number; minutes: number };
+  week: number[];
+  highlights: { key: string; type: string; at: string; by: string; title: string }[];
+};
+
+/** How a company is doing, in one read: what waits, whether its agent is working, what mattered, how much machine work. */
+export function pulseOf(co: Company): Pulse {
+  const now = Date.now(); const weekAgo = new Date(now - 7 * 86_400_000).toISOString();
+  type Row = { key: string; at: string; by: string; type: string | null; title: string | null; project: string | null; phase: string | null };
+  const rows = co.all<Row>(`select r.key, a.at, a.actor as by, a.event_type as type, a.phase,
+      coalesce(json_extract(a.payload, '$.title'), json_extract(a.payload, '$.text')) as title, json_extract(r.body, '$.project_id') as project
+    from records r join journal_assertions a on a.record_id = r.id where r.kind = 'entry' and r.archived = 0 and a.at >= ? order by a.at desc, r.id desc`, weekAgo);
+  const dayAgo = new Date(now - 86_400_000).toISOString();
+  const day = rows.filter((r) => r.at >= dayAgo);
+  const week = Array.from({ length: 7 }, () => 0);
+  for (const r of rows) { const d = Math.floor((now - Date.parse(r.at)) / 86_400_000); if (d >= 0 && d < 7) week[6 - d]!++; }
+  const meaningful = (r: Row) => r.type !== "session" && !!r.title && !(r.type === "action" && isMachine(r.title));
+  const highlights = (day.some(meaningful) ? day : rows).filter(meaningful).slice(0, 5)
+    .map((r) => ({ key: r.key, type: r.type ?? "note", at: r.at, by: r.by, title: r.title!, phase: r.phase }));
+  const count = (sql: string, ...p: string[]) => co.one<{ n: number }>(sql, ...p)?.n ?? 0;
+  const needs = count("select count(*) as n from records where archived = 0 and kind in ('request', 'flag') and json_extract(body, '$.status') = 'open'")
+    + count("select count(*) as n from records where archived = 0 and kind = 'assignment' and json_extract(body, '$.status') in ('blocked', 'needs_permission')");
+  const seen = co.one<{ agent: string; at: string }>("select agent, at from presence order by at desc limit 1");
+  const lastAgent = rows.find((r) => r.by.startsWith("hermes:") || r.by.startsWith("agent:"));
+  const agentName = seen?.agent ?? lastAgent?.by ?? null;
+  const lastSeen = [seen?.at, lastAgent?.at].filter((x): x is string => !!x).sort().at(-1) ?? null;
+  const running = openAssignments(co).find((r) => ["picked_up", "in_progress", "running"].includes(String(r.body.status)));
+  const projects = new Map<string, number>();
+  for (const r of day) if (r.project) projects.set(r.project, (projects.get(r.project) ?? 0) + 1);
+  const topProject = [...projects.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const focusRec = topProject ? records.get(co, topProject) : undefined;
+  return {
+    slug: co.slug, name: co.name, needs, last_at: rows[0]?.at ?? co.one<{ at: string | null }>("select max(created_at) as at from records where kind = 'entry'")?.at ?? null,
+    agent: agentName ? { name: agentName, last_seen: lastSeen, working: !!lastSeen && now - Date.parse(lastSeen) < 15 * 60_000 } : null,
+    focus: running ? String(running.body.title ?? running.key) : focusRec ? records.titleOf(co, focusRec) : null,
+    day: { entries: day.length, sessions: day.filter((r) => r.type === "session").length,
+      failed: day.filter((r) => r.type === "session" && / failed\b/.test(r.title ?? "")).length, minutes: workedMinutes(day.map((r) => r.at)) },
+    week, highlights,
+  };
+}
+
 export const viewOperations: Operation[] = [
   op({
-    name: "project.context",
-    summary: "Focused goal, objectives, state, sourced facts, learning, chronological log and issue notes",
-    role: "viewer",
-    write: false,
-    input: Type.Object({ ref: Ref, limit: Limit(200) }),
-    run: (ctx, i) => projectContext(ctx.company, i.ref, i.limit),
+    name: "pulse.get", summary: "How the company is doing: what waits, whether its agent is working, what mattered lately, how much machine work", role: "viewer", write: false,
+    input: Type.Object({}),
+    run: (ctx) => pulseOf(ctx.company),
   }),
   op({
-    name: "brief.get",
-    summary: "Company knowledge brief and projects",
-    role: "viewer",
-    write: false,
-    input: Type.Object({ budget: Type.Optional(Type.Integer({ minimum: 500, maximum: 20000 })) }),
-    run: (ctx, i) => ({ text: briefText(ctx.company, null, i.budget), company: ctx.company.slug, actor: ctx.actor }),
+    name: "brief.get", summary: "The short company brief an agent reads at the start of a session", role: "viewer", write: false,
+    input: Type.Object({ budget: Type.Optional(Type.Integer({ minimum: 500, maximum: 20000, description: "Most characters to return" })) }),
+    run: (ctx, i) => ({ text: briefText(ctx.company, ctx.actor.kind === "agent" ? ctx.actor.name : null, i.budget), actor: ctx.actor, company: ctx.company.slug }),
   }),
   op({
-    name: "journal.log",
-    summary: "Record a sourced outcome, learning or note",
-    role: "member",
-    write: true,
+    name: "journal.log", summary: "Write a Journal entry: what changed or is now true (outcome), or a note", role: "member", write: true,
     input: Type.Object({
-      title: Type.String({ minLength: 1, maxLength: 300 }),
-      type: Type.Optional(Type.Union([Type.Literal("outcome"), Type.Literal("learning"), Type.Literal("note")])),
+      title: Type.String({ minLength: 1, maxLength: 300, description: "What happened, in one line" }),
+      type: Type.Optional(Type.Union([Type.Literal("outcome"), Type.Literal("note")], { description: "outcome (default) or note" })),
       detail: Type.Optional(Type.String({ maxLength: 8000 })),
-      about: Type.Optional(Ref),
-      project: Type.Optional(Ref),
-      source: Type.Optional(Type.String({ maxLength: 2000 })),
-      source_ids: Type.Optional(Type.Array(Ref)),
+      about: Type.Optional(Type.String({ description: "The record this is about (key or id)" })), project: Type.Optional(Type.String({ description: "The project it moves (key or id)" })),
     }),
-    run: (ctx, i) =>
-      records.logEntry(
-        ctx.company,
-        who(ctx),
-        i.type ?? "outcome",
-        i.title,
-        i.about ? records.need(ctx.company, i.about) : null,
-        meta(ctx),
-        {
-          ...(i.detail ? { detail: i.detail } : {}),
-          ...(i.project ? { project_id: i.project } : {}),
-          ...(i.source ? { source: i.source } : {}),
-          ...(i.source_ids ? { source_ids: i.source_ids } : {}),
-        },
-      ),
+    run: (ctx, i) => {
+      const extra: records.Body = {};
+      if (i.detail) extra.detail = i.detail;
+      if (i.project) extra.project_id = i.project;
+      return records.logEntry(ctx.company, who(ctx), i.type ?? "outcome", i.title, i.about ? records.need(ctx.company, i.about) : null, meta(ctx), extra);
+    },
   }),
   op({
-    name: "journal.list",
-    summary: "Meaningful company or project log, newest first",
-    role: "viewer",
-    write: false,
+    name: "journal.correct", summary: "Append an attributed correction to a Journal assertion; never rewrite the original", role: "member", write: true,
+    input: Type.Object({ ref: Ref, title: Type.String({ minLength: 1, maxLength: 300 }), detail: Type.Optional(Type.String({ maxLength: 8000 })), phase: Type.Optional(Type.Union([Type.Literal("attempted"), Type.Literal("reported")])) }),
+    run: (ctx, i) => {
+      const original = records.need(ctx.company, i.ref);
+      if (!original.assertion) throw invalid("only a Journal assertion can be corrected");
+      return records.logEntry(ctx.company, who(ctx), i.phase ? "action" : "note", i.title, original, meta(ctx),
+        { correction_of: original.id, ...(typeof original.body.assignment_id === "string" ? { assignment_id: original.body.assignment_id } : {}), ...(typeof original.body.project_id === "string" ? { project_id: original.body.project_id } : {}), ...(i.detail ? { detail: i.detail } : {}), ...(i.phase ? { phase: i.phase, action: original.assertion.payload.action ?? null, external_verified: false } : {}) });
+    },
+  }),
+  op({
+    name: "journal.list", summary: "The Journal, newest first: what happened (outcomes, outward actions, sessions, notes)", role: "viewer", write: false,
     input: Type.Object({
-      type: Type.Optional(Type.String()),
-      since: Type.Optional(Type.String()),
-      project: Type.Optional(Ref),
-      limit: Limit(500),
+      type: Type.Optional(Type.Union(ENTRY_TYPES.map((t) => Type.Literal(t)))), since: Type.Optional(Type.String({ description: "\"24h\", \"7d\" or an ISO time" })),
+      project: Type.Optional(Type.String()), limit: Limit(500),
     }),
-    run: (ctx, i) => journalItems(ctx.company, { ...i, since: i.since ? sinceTime(i.since, 24) : undefined }),
+    run: (ctx, i) => journalItems(ctx.company, { type: i.type, since: i.since ? sinceTime(i.since, 24) : undefined, limit: i.limit, project: i.project }),
   }),
   op({
-    name: "activity.list",
-    summary: "Server-attributed record changes",
-    role: "viewer",
-    write: false,
-    input: Type.Object({ since: Type.Optional(Type.String()), limit: Limit(1000) }),
+    name: "activity.list", summary: "Every change in the company, newest first, with who made it", role: "viewer", write: false,
+    input: Type.Object({ since: Type.Optional(Type.String({ description: "\"24h\" (default), \"7d\" or an ISO time" })), limit: Limit(1000) }),
     run: (ctx, i) => activityItems(ctx.company, sinceTime(i.since, 24), i.limit ?? 200),
   }),
   op({
-    name: "archive.list",
-    summary: "Read-only retired records; original keys and history remain accessible",
-    role: "viewer",
-    write: false,
-    input: Type.Object({ limit: Limit(1000) }),
-    run: (ctx, i) =>
-      ctx.company
-        .all<{
-          id: string;
-        }>("select r.id from records r join legacy_records l on l.record_id = r.id order by r.key limit ?", i.limit ?? 200)
-        .map((x) => records.need(ctx.company, x.id)),
+    name: "today.get", summary: "Today: what needs a person, what got done, what is in progress", role: "viewer", write: false,
+    input: Type.Object({ limit: Limit(500), after: Type.Optional(Type.String()), needs_after: Type.Optional(Type.String()), owner: Type.Optional(Type.String()), project: Type.Optional(Ref) }),
+    run: (ctx, i) => {
+      const co = ctx.company; const day = sinceTime("24h", 24);
+      const project = i.project ? records.need(co, i.project).id : undefined;
+      const where = { ...(i.owner ? { owner: i.owner } : {}), ...(project ? { project_id: project } : {}) };
+      const open = records.list(co, { kind: "assignment", statuses: ASSIGNMENT_OPEN, where, limit: i.limit ?? 500, after: i.after });
+      const blockers = records.list(co, { kind: "assignment", statuses: ["blocked", "needs_permission"], where, limit: i.limit ?? 500, after: i.needs_after });
+      const failed = records.list(co, { kind: "assignment", status: "failed", where, since: sinceTime("7d", 168), limit: i.limit ?? 500, after: i.needs_after });
+      const needs = [...blockers, ...failed].sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.key.localeCompare(a.key)).slice(0, i.limit ?? 500);
+      return {
+        needs_you: needs.map((r) => ({ ...assignmentOf(co, r), cursor: assignmentCursor(r) })),
+        results: journalItems(co, { type: "outcome", since: day, limit: 50 }),
+        actions: journalItems(co, { type: "action", since: day, limit: 50 }).map((e) => ({ key: e.key, at: e.at, by: e.by, action: e.action, detail: e.title, amount: e.amount, unit: e.unit, phase: e.phase, external_verified: e.external_verified, assertion: e.assertion, assertion_context: e.assertion_context })),
+        open_work: open.map((r) => ({ ...assignmentOf(co, r), cursor: assignmentCursor(r) })),
+      };
+    },
   }),
   op({
-    name: "company.get",
-    summary: "Company brief and record counts",
-    role: "viewer",
-    write: false,
+    name: "company.get", summary: "This company: its name, brief, and how many records of each kind", role: "viewer", write: false,
     input: Type.Object({}),
-    run: (ctx) => ({
-      slug: ctx.company.slug,
-      name: ctx.company.name,
-      brief: companyRecord(ctx.company)?.body.brief ?? "",
-      kinds: ctx.company.all(
-        "select kind, sum(archived = 0) as live, sum(archived = 1) as archived from records where id not in (select record_id from legacy_records) group by kind",
-      ),
-      last_seq: ctx.company.one<{ n: number }>("select coalesce(max(seq),0) as n from revisions")!.n,
-    }),
+    run: (ctx) => {
+      const co = ctx.company; const rec = companyRecord(co);
+      return {
+        slug: co.slug, name: co.name, key: rec?.key ?? null, brief: typeof rec?.body.brief === "string" ? rec.body.brief : "",
+        kinds: co.all<{ kind: string; live: number; archived: number }>("select kind, sum(archived = 0) as live, sum(archived = 1) as archived from records group by kind order by kind"),
+        last_seq: co.one<{ n: number | null }>("select max(seq) as n from revisions")?.n ?? 0,
+      };
+    },
   }),
   op({
-    name: "company.update",
-    summary: "Update company brief",
-    role: "admin",
-    write: true,
+    name: "company.update", summary: "Change the company brief that agents read first", role: "admin", write: true,
     input: Type.Object({ brief: Type.String({ maxLength: 12000 }) }),
     run: (ctx, i) => {
-      const r = companyRecord(ctx.company);
-      return r
-        ? records.patch(ctx.company, who(ctx), r.id, i, meta(ctx))
-        : records.create(ctx.company, who(ctx), "company", { name: ctx.company.name, ...i }, meta(ctx));
+      const rec = companyRecord(ctx.company);
+      return rec ? records.patch(ctx.company, who(ctx), rec.id, { brief: i.brief }, meta(ctx))
+        : records.create(ctx.company, who(ctx), "company", { name: ctx.company.name, brief: i.brief }, meta(ctx));
     },
   }),
 ];

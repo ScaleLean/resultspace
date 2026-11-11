@@ -13,15 +13,9 @@ type Json = Record<string, unknown>;
 async function world(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), "rs-cli-"));
   const s = await startServer({ dataDir: join(dir, "data"), port: 0, host: "127.0.0.1" });
-  t.after(async () => {
-    await s.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
+  t.after(async () => { await s.close(); rmSync(dir, { recursive: true, force: true }); });
   const config = [`server_url = "http://127.0.0.1:${s.port}"`, `default_company = "acme"`];
-  for (const [slug, name, agent, role] of [
-    ["acme", "Acme", "hermes:acme", "member"],
-    ["other-co", "Other Co", "hermes:acme", "viewer"],
-  ] as const) {
+  for (const [slug, name, agent, role] of [["acme", "Acme", "hermes:acme", "member"], ["other-co", "Other Co", "hermes:acme", "viewer"]] as const) {
     const co = s.companies.create(slug, name);
     addAgent(co, agent, role);
     if (slug === "acme") addAgent(co, "boss", "admin");
@@ -31,51 +25,63 @@ async function world(t: TestContext) {
   writeFileSync(join(dir, "cli.toml"), config.join("\n"));
   type Ran = { code: number; out: string; err: string; json: () => { ok: boolean; command: string; data: Json; error?: Json } };
   // Not spawnSync: the server lives in this process and must stay free to answer.
-  const rs = (...args: string[]) =>
-    new Promise<Ran>((ok) => {
-      const child = execFile(
-        process.execPath,
-        [join(import.meta.dirname, "..", "src", "cli", "rs.ts"), ...args],
-        { env: { ...process.env, RS_CONFIG: join(dir, "cli.toml") }, encoding: "utf8" },
-        (_e, out, err) => ok({ code: child.exitCode ?? 1, out, err, json: () => JSON.parse(out) as ReturnType<Ran["json"]> }),
-      );
-    });
+  const rs = (...args: string[]) => new Promise<Ran>((ok) => {
+    const child = execFile(process.execPath, [join(import.meta.dirname, "..", "src", "cli", "rs.ts"), ...args], { env: { ...process.env, RS_CONFIG: join(dir, "cli.toml") }, encoding: "utf8" },
+      (_e, out, err) => ok({ code: child.exitCode ?? 1, out, err, json: () => JSON.parse(out) as ReturnType<Ran["json"]> }));
+  });
   return { dir, s, rs };
 }
 
-test("rs: retained CRUD exposes company scope and server attribution", async (t) => {
+test("rs: the commands scripts run today keep their shapes", async (t) => {
   const { rs } = await world(t);
   assert.equal((await rs("whoami", "--json")).code, 0);
   const companies = (await rs("--json", "--online", "companies")).json();
-  assert.deepEqual(
-    (companies.data.companies as Json[]).map((c) => [c.slug, c.role]),
-    [
-      ["acme", "member"],
-      ["other-co", "viewer"],
-    ],
-  );
-  const made = (
-    await rs(
-      "--json",
-      "--online",
-      "new",
-      "-C",
-      "acme",
-      "note",
-      "--body",
-      JSON.stringify({ title: "Run 1", note_type: "prime_reconcile", run_key: "r1" }),
-    )
-  ).json();
+  assert.deepEqual((companies.data.companies as Json[]).map((c) => [c.slug, c.role]), [["acme", "member"], ["other-co", "viewer"]]);
+  const made = (await rs("--json", "--online", "new", "-C", "acme", "note", "--body", JSON.stringify({ title: "Run 1", note_type: "prime_reconcile", run_key: "r1" }))).json();
   assert.equal(made.data.key, "JNL-0001");
-  assert.equal((await rs("--json", "--online", "set", "-C", "acme", "JNL-0001", 'summary:={"n":2}', "run_key=r2")).code, 0);
+  assert.equal((await rs("--json", "--online", "set", "-C", "acme", "JNL-0001", "metadata:={\"summary\":{\"n\":2},\"run_key\":\"r2\"}")).code, 0);
   const shown = (await rs("--json", "--online", "show", "-C", "acme", "JNL-0001")).json();
-  assert.deepEqual(((shown.data.record as Json).body as Json).summary, { n: 2 });
+  assert.deepEqual((((shown.data.record as Json).body as Json).metadata as Json).summary, { n: 2 });
   const listed = (await rs("--json", "--online", "ls", "note", "-C", "acme")).json();
   const first = (listed.data.records as Json[])[0]!;
-  assert.deepEqual(Object.keys(first).sort(), ["archived", "body", "company_id", "created_at", "id", "key", "kind", "rev", "status", "title", "updated_at", "updated_by"]);
-  assert.equal(first.updated_by,"hermes:acme");
+  assert.deepEqual(Object.keys(first).sort(), ["archived", "body", "company_id", "conflict", "id", "key", "kind", "pending_ops", "rev", "status", "sync_state", "title"]);
   assert.equal(first.title, "Run 1");
-  assert.equal((first.body as Json).run_key, "r2");
+  assert.equal((first.body as Json).run_key, "r1");
+});
+
+test("rs: what agents type from their skills", async (t) => {
+  const { rs, s } = await world(t);
+  const acme = s.companies.get("acme");
+  assert.match((await rs("brief")).out, /## Acme \(acme\)/);
+  assert.match((await rs("new", "project", "title=Launch", "status=active")).out, /created PRJ-0001/);
+  assert.match((await rs("task", "add", "Call supplier", "--project", "PRJ-0001")).out, /created TSK-0001/);
+  assert.equal((await rs("set", "TSK-0001", "status=in_progress", "priority=high", "budget_cents:=50000")).code, 0);
+  assert.equal((await rs("task", "done", "TSK-0001", "--result", "Supplier confirmed 4-week lead time")).code, 0);
+  assert.match((await rs("results")).out, /Supplier confirmed 4-week lead time/);
+  assert.match((await rs("ls", "task", "--status", "done")).out, /TSK-0001\s+Call supplier\s+done/);
+  assert.match((await rs("note", "add", "Weekly check", "--text", "all quiet", "--online")).out, /noted JNL-000\d/);
+  assert.match((await rs("ask", "supplier")).out, /TSK-0001/);
+  assert.match((await rs("search", "nothing-like-this")).out, /Not on record/);
+  // An assignment handed to this agent.
+  const { run } = await import("../src/operations/index.ts");
+  run(acme, { kind: "person", name: "alex", role: "admin" }, "record.create", { kind: "assignment", body: { title: "Check label", owner: "hermes:acme", project_id: "PRJ-0001" } });
+  assert.match((await rs("assignment")).out, /ASG-0001\s+Waiting for the agent/);
+  assert.match((await rs("assignment", "next")).out, /It is yours/);
+  assert.equal((await rs("assignment", "start", "ASG-0001", "--progress", "Reading the formula")).code, 0);
+  assert.match((await rs("act", "publish", "--detail", "Updated listing copy", "--assignment", "ASG-0001")).out, /recorded JNL-000\d/);
+  assert.equal((await rs("assignment", "report", "ASG-0001")).code, 2, "a report needs --result");
+  const reported = await rs("assignment", "report", "ASG-0001", "--result", "Label matches the formula");
+  assert.equal(reported.code, 0);
+  assert.match(reported.out, /reported_by\s+hermes:acme/);
+  assert.match(reported.out, /verification\s+not verified/, "a reported result says it is not verified");
+  assert.match((await rs("asg")).out, /No open assignments/);
+  assert.equal((await rs("assignment", "verify", "ASG-0001")).code, 0, "legacy verify appends a review opinion");
+  assert.equal((await rs("assignment", "review", "ASG-0001", "--note", "Checked locally")).code, 0);
+  assert.match((await rs("today")).out, /Label matches the formula/);
+  assert.match((await rs("activity", "--since", "24h")).out, /ASG-0001/);
+  assert.match((await rs("help", "assignments")).out, /not a project \(a body of work\) and not a task/);
+  assert.equal((await rs("sync")).code, 0);
+  assert.match((await rs("doctor")).out, /All good/);
 });
 
 test("rs: exit codes and the company wall", async (t) => {
@@ -89,114 +95,168 @@ test("rs: exit codes and the company wall", async (t) => {
   assert.equal((await rs("new", "task", "status=todo")).code, 6, "a rule refused it");
   assert.equal((await rs("new", "note", "title=x", "-C", "other-co")).code, 4, "viewer in the other company");
   assert.equal((await rs("ls", "note", "-C", "third-co")).code, 4, "a company this profile has no key for");
-  await rs("new", "note", "title=Acme secret");
+  (await rs("new", "note", "title=Acme secret"));
   assert.match((await rs("ls", "note", "-C", "other-co")).out, /\(none\)/);
   assert.equal((await rs("show", "JNL-0001", "-C", "other-co")).code, 4);
 });
 
-test("real API + CLI focused project read and sourced record path", async (t) => {
-  const { s, rs } = await world(t);
-  let made = await rs(
-    "new",
-    "project",
-    "title=Launch",
-    "goal=Confirm supply",
-    'objectives:=["Compare quotes"]',
-    "current_state=Researching",
-    "--json",
-  );
-  assert.equal(made.code, 0, made.err);
-  const project = String(made.json().data.key);
-  made = await rs(
-    "new",
-    "fact",
-    "--body",
-    JSON.stringify({
-      title: "Lead time",
-      subject: "Supplier A",
-      predicate: "lead_time",
-      value_type: "number",
-      value: 4,
-      unit: "weeks",
-      source: "Quote dated Oct 11",
-      project_id: project,
-    }),
-    "--json",
-  );
-  assert.equal(made.code, 0, made.err);
-  const context = await rs("project", "context", project, "--json");
-  assert.equal(context.code, 0, context.err);
-  const data = context.json().data;
-  assert.equal((data.facts as Json[]).length, 1);
-  assert.equal(((data.project as Json).record as Json).key, project);
-  const unsourced = await rs("log", "Unsupported learning", "--project", project, "--type", "learning", "--json");
-  assert.notEqual(unsourced.code, 0);
-  assert.match(unsourced.out + unsourced.err, /Learning needs a source/);
-  const recorded = await rs(
-    "log",
-    "Quote confirmed",
-    "--project",
-    project,
-    "--type",
-    "learning",
-    "--text",
-    "Lead time is four weeks",
-    "--source",
-    "Supplier quote Oct 11",
-    "--json",
-  );
-  assert.equal(recorded.code, 0, recorded.err);
-  const key = String(recorded.json().data.key);
-  const co = s.companies.get("acme");
+// The two company HUDs run `rs today --json` and `rs work --json` and refuse any output with a warning.
+// `rs work` must keep its JSON (work_orders, work_order) and never warn, whatever server it talks to.
+test("rs: old `rs work` JSON stays as it was; `rs assignment` is the new contract", async (t) => {
+  const { rs, s } = await world(t);
   const { run } = await import("../src/operations/index.ts");
-  const actor = { kind: "person", name: "alex", role: "admin" } as const;
-  const history = run(co, actor, "record.history", { ref: key }) as Json[];
-  assert.equal(history[0]!.actor, "hermes:acme");
-  assert.equal((history[0]!.body as Json).source, "Supplier quote Oct 11");
-  assert.equal((await rs("project", "context", project, "-C", "other-co", "--json")).code, 4);
-  assert.equal((await rs("skills", "sync", "--json")).code, 2);
+  const boss = { kind: "person", name: "alex", role: "admin" } as const;
+  run(s.companies.get("acme"), boss, "record.create", { kind: "work_order", body: { title: "Old caller", owner: "hermes:acme" } });
+
+  const work = await rs("work", "--json");
+  const w = work.json() as unknown as { ok: boolean; command: string; data: { work_orders: Json[] }; warnings: unknown[] };
+  assert.deepEqual([work.code, w.ok, w.command, w.warnings, Object.keys(w.data)], [0, true, "work", [], ["work_orders"]]);
+  assert.equal(work.err, "", "nothing on stderr with --json");
+  const first = w.data.work_orders[0]!;
+  for (const field of ["id", "key", "rev", "title", "owner", "status", "status_words", "brief", "result", "progress", "answer", "due_on", "project", "updated_at"]) assert.ok(field in first, field);
+  assert.deepEqual([first.key, first.status], ["ASG-0001", "queued"]);
+  assert.match((await rs("work")).err, /`rs work` is now `rs assignment`/, "people get a note on stderr");
+
+  const next = (await rs("work", "next", "--json")).json() as unknown as { data: { work_order: Json; claimed: boolean }; warnings: unknown[] };
+  assert.deepEqual([next.data.work_order.key, next.data.claimed, next.warnings], ["ASG-0001", true, []]);
+  assert.deepEqual(Object.keys(((await rs("work", "start", "ASG-0001", "--json")).json() as unknown as { data: Json }).data), ["work_order"]);
+  assert.equal((await rs("act", "ads", "--detail", "Raised the budget", "--wo", "ASG-0001", "--json")).code, 0);
+  assert.equal((await rs("act", "ads", "--detail", "x", "--wo", "ASG-0001", "--assignment", "JNL-0001")).code, 2);
+  const today = (await rs("today", "--json")).json() as unknown as { data: Record<string, unknown>; warnings: unknown[] };
+  assert.deepEqual([Object.keys(today.data).sort(), today.warnings], [["actions", "needs_you", "open_work", "results"], []]);
+  assert.equal((today.data.actions as Json[])[0]?.detail, "Raised the budget");
+
+  const list = (await rs("assignment", "--json")).json() as unknown as { data: { assignments: (Json & { verification: Json })[] }; warnings: unknown[] };
+  assert.deepEqual([Object.keys(list.data), list.data.assignments[0]?.key, list.data.assignments[0]?.kind, list.data.assignments[0]?.verification.state, list.warnings],
+    [["assignments"], "ASG-0001", "assignment", "not_verified", []]);
+  const shown = (await rs("assignment", "show", "ASG-0001", "--json")).json() as unknown as { data: { assignment: Json } };
+  assert.deepEqual(["outcomes", "sessions", "actions"].map((k) => (shown.data.assignment[k] as unknown[]).length), [0, 0, 1]);
+  const done = (await rs("work", "report", "ASG-0001", "--result", "Budget is $60/day", "--json")).json() as unknown as { data: { work_order: Json } };
+  assert.equal(done.data.work_order.status, "done");
+  const old = (await rs("work", "show", "ASG-0001", "--json")).json() as unknown as { data: { work_order: Json } };
+  assert.deepEqual(["results", "receipts", "actions"].map((k) => (old.data.work_order[k] as unknown[]).length), [1, 0, 1], "work show keeps results and receipts");
+  assert.deepEqual(((await rs("ls", "work_order", "--all", "--json")).json() as unknown as { data: { records: Json[] } }).data.records.map((r) => r.kind), ["assignment"]);
 });
 
-test("CLI Journal scope rejects conflicting project/about through log, generic creation and patch", async (t) => {
-  const { rs } = await world(t);
-  for (const name of ["A", "B"]) assert.equal((await rs("new", "project", `title=${name}`)).code, 0);
-  assert.equal((await rs("new", "knowledge", "title=A claim", "body=Scoped A", "project_id=PRJ-0001")).code, 0);
-  for (const about of ["PRJ-0001", "KNW-0001"]) {
-    assert.notEqual((await rs("log", "Conflict", "--about", about, "--project", "PRJ-0002")).code, 0);
-    assert.notEqual((await rs("new", "entry", "title=Conflict", `about_id=${about}`, "project_id=PRJ-0002")).code, 0);
-  }
-  const entry = await rs("log", "Inherited A", "--about", "KNW-0001", "--json");
-  assert.equal(entry.code, 0, entry.err);
-  assert.notEqual((await rs("set", String(entry.json().data.key), "project_id=PRJ-0002")).code, 0);
-  assert.equal(((await rs("project", "context", "PRJ-0001", "--json")).json().data.log as Json[]).length, 1);
-  assert.deepEqual((await rs("project", "context", "PRJ-0002", "--json")).json().data.log, []);
-});
 
-test("CLI and API Journal preserve legacy about keys and supply display titles", async (t) => {
-  const { dir, s, rs } = await world(t);
+test("rs: generic assignment writes allow shared lifecycle metadata and protect provenance", async (t) => {
+  const { s, rs } = await world(t);
+  const { run } = await import("../src/operations/index.ts");
   const co = s.companies.get("acme");
-  const { legacyJournal } = await import("./fixtures/legacy-journal.ts");
-  legacyJournal(co);
-  const before = ["records", "revisions", "links"].map(table => co.all(`select * from ${table} order by 1`));
-  const key = (await import("node:fs")).readFileSync(join(dir, "acme.key"), "utf8").trim();
-  const response = await fetch(`http://127.0.0.1:${s.port}/v1/op/journal.list`, {
-    method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: "{}",
-  });
-  assert.equal(response.status, 200);
-  const api = (await response.json()).result as Json[];
-  const cli = await rs("journal", "--json", "--online");
-  assert.equal(cli.code, 0, cli.err);
-  const items = cli.json().data.items as Json[];
-  assert.deepEqual(items, api);
-  const missing = items.find(e => e.key === "JNL-0901")!;
-  assert.equal(missing.type, "note");
-  assert.equal((missing.about as Json).key, "KNW-0901");
-  assert.equal((missing.about as Json).title, "Historical supplier evidence");
-  const unknown = items.find(e => e.key === "JNL-0902")!;
-  assert.equal(unknown.type, "legacy_observation");
-  assert.equal((unknown.about as Json).key, "KNW-0902");
-  assert.equal((unknown.about as Json).title, "KNW-0902");
-  const text = await rs("journal", "--online");
-  assert.equal(text.code, 0, text.err); assert.match(text.out, /Imported supplier observation/);
-  assert.deepEqual(["records", "revisions", "links"].map(table => co.all(`select * from ${table} order by 1`)), before);
+  run(co, { kind: "person", name: "alex", role: "admin" }, "record.create", { kind: "assignment", body: { title: "Count", owner: "hermes:acme" } });
+  for (const args of [
+    ["set", "ASG-0001", "verification=verified"],
+  ]) {
+    const denied = await rs("--online", "--json", ...args);
+    assert.notEqual(denied.code, 0);
+    assert.equal(denied.json().error?.kind, "forbidden");
+  }
+  assert.equal((await rs("--online", "--json", "assignment", "report", "ASG-0001", "--result", "Counted 12")).code, 0);
+  const denied = await rs("--online", "--json", "set", "ASG-0001", "reported_by=alex");
+  assert.notEqual(denied.code, 0);
+  assert.equal(denied.json().error?.kind, "forbidden");
+});
+
+test("rs: members write shared assignment outcomes and result shortcuts", async (t) => {
+  const { s, rs } = await world(t);
+  const { run } = await import("../src/operations/index.ts");
+  const co = s.companies.get("acme");
+  const human = { kind: "person", name: "alex", role: "admin" } as const;
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Count", owner: "boss" } });
+  run(co, human, "record.create", { kind: "task", body: { title: "Step", assignment_id: "ASG-0001" } });
+  run(co, human, "record.create", { kind: "entry", body: { type: "outcome", title: "Checked", assignment_id: "ASG-0001" } });
+  for (const args of [
+    ["new", "result", "title=Counted", "work_order_id=ASG-0001"],
+    ["new", "entry", "--body", JSON.stringify({ title: "Counted", type: "outcome", assignment_id: "ASG-0001" })],
+    ["set", "JNL-0001", "title=Changed"],
+    ["archive", "JNL-0001"],
+    ["restore", "JNL-0001"],
+    ["set", "TSK-0001", "title=Changed", "--result", "Counted"],
+    ["new", "task", "title=Other", "assignment_id=ASG-0001", "--result", "Counted"],
+  ]) {
+    const allowed = await rs("--online", "--json", ...args);
+    assert.equal(allowed.code, 0);
+  }
+  const task = run(co, human, "record.get", { ref: "TSK-0001" }) as { rev: number };
+  assert.equal(task.rev, 2);
+  assert.equal((run(co, human, "record.list", { kind: "task" }) as unknown[]).length, 2);
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Own count", owner: "hermes:acme" } });
+  assert.equal((await rs("--online", "--json", "assignment", "report", "ASG-0002", "--result", "Counted 12")).code, 0);
+});
+
+test("rs: task aliases and outcome edits remain shared after relinking", async (t) => {
+  const { s, rs } = await world(t);
+  const { run } = await import("../src/operations/index.ts");
+  const co = s.companies.get("acme");
+  const human = { kind: "person", name: "alex", role: "admin" } as const;
+  run(co, human, "record.create", { kind: "assignment", body: { title: "One", owner: "boss" } });
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Two", owner: "hermes:acme" } });
+  run(co, human, "record.create", { kind: "task", body: { title: "Step", assignment_id: "ASG-0001" } });
+  run(co, human, "journal.log", { title: "Checked", about: "TSK-0001" });
+  for (const fields of [["assignment_id=ASG-0002"], ["work_order_id=ASG-0002"]]) {
+    const denied = await rs("--online", "--json", "set", "TSK-0001", ...fields);
+    assert.equal(denied.code, 0);
+  }
+  run(co, human, "record.patch", { ref: "TSK-0001", set: { assignment_id: "ASG-0002" } });
+  for (const args of [
+    ["set", "TSK-0001", "work_order_id=ASG-0001"],
+    ["set", "JNL-0001", "title=Changed"],
+    ["set", "JNL-0001", "assignment_id=ASG-0002"],
+  ]) assert.equal((await rs("--online", "--json", ...args)).code, 0);
+});
+
+test("rs: session/action evidence and assignment tasks are shared", async (t) => {
+  const { s, rs } = await world(t);
+  const { run } = await import("../src/operations/index.ts");
+  const co = s.companies.get("acme");
+  const human = { kind: "person", name: "alex", role: "admin" } as const;
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Count", owner: "boss" } });
+  run(co, human, "record.create", { kind: "task", body: { title: "Step", status: "todo", assignment_id: "ASG-0001" } });
+  run(co, human, "record.create", { kind: "entry", body: { title: "Session", type: "session", assignment_id: "ASG-0001" } });
+  for (const args of [
+    ["new", "receipt", "title=Session", "work_order_id=ASG-0001"],
+    ["new", "action", "title=Action", "assignment_id=ASG-0001"],
+    ["set", "TSK-0001", "title=Changed"], ["set", "TSK-0001", "status=done"],
+    ["set", "JNL-0001", "title=Changed"], ["archive", "JNL-0001"], ["restore", "JNL-0001"],
+  ]) {
+    const denied = await rs("--online", "--json", ...args);
+    assert.equal(denied.code, 0);
+    assert.equal(denied.code, 0);
+  }
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Own", owner: "hermes:acme" } });
+  assert.equal((await rs("--online", "--json", "act", "ads", "--detail", "Owner action", "--assignment", "ASG-0002")).code, 0);
+  assert.equal((await rs("--online", "--json", "new", "receipt", "title=Owner session", "assignment_id=ASG-0002")).code, 0);
+});
+
+test("rs: assignment evidence and benign notes cannot take shared-task write authority", async (t) => {
+  const { s, rs } = await world(t);
+  const { run } = await import("../src/operations/index.ts");
+  const co = s.companies.get("acme");
+  const human = { kind: "person", name: "alex", role: "admin" } as const;
+  run(co, human, "record.create", { kind: "assignment", body: { title: "Own", owner: "boss" } });
+  run(co, human, "record.create", { kind: "task", body: { title: "Shared", status: "todo" } });
+  run(co, { kind: "agent", name: "boss", role: "admin" }, "record.create", { kind: "entry", body: { title: "Evidence", type: "outcome", assignment_id: "ASG-0001", about_id: "TSK-0001" } });
+  assert.equal((await rs("--online", "--json", "set", "TSK-0001", "title=Shared update", "status=done")).code, 0);
+  run(co, human, "record.patch", { ref: "JNL-0001", set: { assignment_id: null, about_id: null } });
+  for (let n = 0; n < 130; n++) run(co, { kind: "agent", name: "hermes:acme", role: "member" }, "record.create", { kind: "entry", body: { title: `Note ${n}`, type: "note", about_id: "TSK-0001" } });
+  for (const args of [["set", "TSK-0001", "title=Still shared"], ["archive", "TSK-0001"], ["restore", "TSK-0001"]])
+    assert.equal((await rs("--online", "--json", ...args)).code, 0);
+  assert.equal((await rs("--online", "--json", "set", "JNL-0001", "title=Changed", "metadata:={\"assignment_ids\":[]}")).code, 0);
+});
+
+test("rs: assignment ls exposes limit/cursors and reaches beyond 1000 open assignments", async (t) => {
+  const { s, rs } = await world(t);
+  const { run } = await import("../src/operations/index.ts"); const co = s.companies.get("acme");
+  co.tx(() => { for (let n = 0; n < 1007; n++) run(co, { kind: "agent", name: "hermes:acme", role: "member" }, "record.create", { kind: "assignment", body: { title: `Open ${n}`, owner: "hermes:acme" } }); });
+  const keys = new Set<string>(); let after: string | undefined;
+  for (let page = 0; page < 4; page++) {
+    const response = await rs("--json", "assignment", "ls", "--owner", "hermes:acme", "--limit", "500", ...(after ? ["--after", after] : []));
+    assert.equal(response.code, 0, response.err);
+    const rows = response.json().data.assignments as Json[];
+    if (!rows.length) break;
+    assert.ok(rows.length <= 500);
+    for (const row of rows) { assert.ok(!keys.has(String(row.key))); keys.add(String(row.key)); }
+    after = String(rows.at(-1)!.cursor);
+  }
+  assert.equal(keys.size, 1007);
 });

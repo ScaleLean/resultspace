@@ -1,4 +1,30 @@
-"""Read focused ResultSpace knowledge and explicitly record sourced learning. No runtime hooks."""
+"""Talk to the ResultSpace server as this Hermes profile's agent identity.
+
+Identity comes from the profile's own `rs` config:
+  $RS_CONFIG, else ~/.config/resultspace/profiles/<profile>/cli.toml, else ~/.config/resultspace/cli.toml
+
+    server_url = "http://127.0.0.1:4390"
+    default_company = "acme"
+    [companies.acme]
+    key_file = "/path/acme.key"    # must be chmod 600
+
+One key file per company: a key belongs to exactly one company, so no request names a company.
+The config holds the PATH of each key file, never the key. The key is read from its file for
+each request and never logged, printed or returned.
+
+The server speaks `POST /v1/op/<operation>`. The named methods below (brief, record_action,
+receipt, ...) call the operations directly. `get`/`post`/`request` still accept the routes the
+plugins were written against (/v1/brief, /v1/work, /v1/ask, /v1/ops, ...) and translate them to
+operations, returning the shapes the plugins read (`work_orders[]`, `hits[]`,
+`results[].result.outcome`).
+
+Assignments (an outcome handed to one agent) were called work orders before ResultSpace schema 3.
+`assignment_*` call the new operations and fall back to the old `work.*` ones on a server that does
+not have them yet; `work_*` and the /v1/work routes keep the old names and shapes.
+
+Every failure is an RsError (status 0 when the server is unreachable or the config/key is
+unusable). Stdlib only (urllib, tomllib): nothing to install into Hermes.
+"""
 from __future__ import annotations
 
 import json
@@ -37,7 +63,8 @@ def config_path(profile: str, env: Mapping[str, str] | None = None) -> Path:
     if e.get("RS_CONFIG"):
         return Path(e["RS_CONFIG"]).expanduser()
     base = Path(e.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "resultspace"
-    return base / "cli.toml" if profile == "default" else base / "profiles" / profile / "cli.toml"
+    per = base / "profiles" / profile / "cli.toml"
+    return per if per.exists() else base / "cli.toml"
 
 
 _SCALAR = (str, int, float, bool)
@@ -50,7 +77,7 @@ def _pick(body: Any, *names: str) -> dict:
 
 
 class Client:
-    """Authenticated knowledge client, one key per company."""
+    """Minimal JSON client. Short timeouts: the guard runs inside Hermes's pre_tool_call."""
 
     def __init__(self, server_url: str, key_files: Mapping[str, str | os.PathLike] | None = None,
                  default_company: str | None = None, timeout: float = 4.0):
@@ -72,27 +99,13 @@ class Client:
         except Exception as e:  # malformed config
             raise RsError(0, f"unreadable ResultSpace config {path}: {e}")
         url = server_override or cfg.get("server_url")
-        if not isinstance(url, str) or not url.strip():
-            raise RsError(0, f"{path}: server_url is missing or must be text")
-        try:
-            parsed = urllib.parse.urlsplit(url)
-        except ValueError:
-            raise RsError(0, f"{path}: server_url must be an HTTP(S) URL")
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            raise RsError(0, f"{path}: server_url must be an HTTP(S) URL")
-        cos = cfg.get("companies")
-        if not isinstance(cos, dict) or not cos:
+        cos = cfg.get("companies") if isinstance(cfg.get("companies"), dict) else {}
+        keys = {s: v["key_file"] for s, v in cos.items() if isinstance(v, dict) and v.get("key_file")}
+        if not url:
+            raise RsError(0, f"{path}: server_url is missing")
+        if not keys:
             raise RsError(0, f"{path}: no [companies.<slug>] key_file entries")
-        keys = {}
-        for slug, entry in cos.items():
-            key = entry.get("key_file") if isinstance(entry, dict) else None
-            if not isinstance(key, str) or not key.strip():
-                raise RsError(0, f"{path}: companies.{slug}.key_file must be a nonempty path")
-            keys[slug] = key
-        default = cfg.get("default_company")
-        if default is not None and (not isinstance(default, str) or default not in keys):
-            raise RsError(0, f"{path}: default_company must name a configured company")
-        return cls(url, keys, default)
+        return cls(url, keys, cfg.get("default_company"))
 
     # ------------------------------------------------------------------ company and key
 
@@ -178,15 +191,74 @@ class Client:
     def brief(self, budget: int | None = None, company: str | None = None) -> dict:
         return self.op("brief.get", {"budget": int(budget)} if budget else {}, company) or {}
 
-    def project_context(self, ref: str, company: str | None = None) -> dict:
-        return self.op("project.context", {"ref": ref}, company)
+    @staticmethod
+    def _under(assignment: str | None, work_order: str | None) -> dict:
+        """The assignment an action or receipt was done under. Sent under both names: a server from
+        before the rename reads `work_order`, a newer one accepts both when they agree."""
+        ref = assignment or work_order
+        return {"assignment": ref, "work_order": ref} if ref else {}
 
-    def record_learning(self, project: str, title: str, detail: str, source: str,
-                        company: str | None = None, idempotency_key: str | None = None) -> dict:
-        if not source.strip():
-            raise RsError(0, "Learning needs a source citation")
-        return self.op("journal.log", {"project": project, "title": title, "detail": detail,
-                       "source": source, "type": "learning"}, company, idempotency_key=idempotency_key)
+    def record_action(self, action: str, detail: str, amount: float | None = None, unit: str | None = None,
+                      work_order: str | None = None, company: str | None = None, assignment: str | None = None, phase: str | None = None) -> dict:
+        body = _pick({"action": action, "detail": detail, "amount": amount, "unit": unit, "phase": phase},
+                     "action", "detail", "amount", "unit", "phase")
+        return self.op("action.record", {**body, **self._under(assignment, work_order)}, company) or {}
+
+    def receipt(self, summary: str, session: str | None = None, work_order: str | None = None,
+                detail: dict | None = None, company: str | None = None, assignment: str | None = None) -> dict:
+        body = {**_pick({"summary": summary, "session": session}, "summary", "session"), **self._under(assignment, work_order)}
+        d = {k: v for k, v in (detail or {}).items() if isinstance(v, _SCALAR)}
+        if d:
+            body["detail"] = d
+        return self.op("agent.receipt", body, company) or {}
+
+    def presence(self, session: str, company: str | None = None) -> dict:
+        return self.op("agent.presence", {"session": session}, company) or {}
+
+    # ---- assignments (new names; fall back to work.* on a server from before the rename)
+    def _op_or_old(self, name: str, old: str, input: dict, company: str | None) -> Any:
+        try:
+            return self.op(name, input, company)
+        except RsError as e:
+            if e.status == 404 and e.message == f"no operation {name}":
+                return self.op(old, input, company)
+            raise
+
+    def assignment_list(self, all: bool | None = None, owner: str | None = None, project: str | None = None,
+                        limit: int | None = None, company: str | None = None) -> list[dict]:
+        inp = _pick({"all": all, "owner": owner, "project": project, "limit": limit}, "all", "owner", "project", "limit")
+        if project:  # only the new operation filters by project
+            return list(self.op("assignment.list", inp, company) or [])
+        return list(self._op_or_old("assignment.list", "work.list", inp, company) or [])
+
+    def assignment_next(self, company: str | None = None) -> dict:
+        """{assignment: {...} | None, claimed: bool}."""
+        r = dict(self._op_or_old("assignment.next", "work.next", {}, company) or {})
+        if "work_order" in r:
+            r["assignment"] = r.pop("work_order")
+        return r
+
+    def assignment_claim(self, ref: str, company: str | None = None) -> dict:
+        return self.op("assignment.claim", {"ref": str(ref)}, company) or {}
+
+    def assignment_show(self, ref: str, company: str | None = None) -> dict:
+        """The assignment with `outcomes`, `sessions` and `actions` recorded under it."""
+        r = dict(self._op_or_old("assignment.show", "work.show", {"ref": str(ref)}, company) or {})
+        r.setdefault("outcomes", r.get("results", []))
+        r.setdefault("sessions", r.get("receipts", []))
+        return r
+
+    # ---- the old names, with the old shapes (work_order, results, receipts)
+    def work_list(self, all: bool | None = None, owner: str | None = None, limit: int | None = None,
+                  company: str | None = None) -> list[dict]:
+        return list(self.op("work.list", _pick({"all": all, "owner": owner, "limit": limit},
+                                               "all", "owner", "limit"), company) or [])
+
+    def work_next(self, company: str | None = None) -> dict:
+        return self.op("work.next", {}, company) or {}
+
+    def work_show(self, ref: str, company: str | None = None) -> dict:
+        return self.op("work.show", {"ref": str(ref)}, company) or {}
 
     def search(self, q: str, kind: str | None = None, limit: int | None = None,
                company: str | None = None, timeout: float | None = None) -> list[dict]:
@@ -199,3 +271,82 @@ class Client:
         return self.op("record.create", inp, company, idempotency_key=idempotency_key) or {}
 
     # ------------------------------------------------------------------ the routes the plugins use
+
+    def request(self, method: str, path: str, body: Any = None, query: dict | None = None,
+                timeout: float | None = None) -> Any:
+        """Accepts the old /v1 routes and answers in their shapes. `company_id` in a body (now a
+        slug) picks the key file and is not sent."""
+        q = {k: v for k, v in (query or {}).items() if v is not None}
+        b = body if isinstance(body, dict) else {}
+        co = b.get("company_id") or q.get("company_id") or None
+        m = method.upper()
+        if (m, path) == ("GET", "/v1/me"):
+            return self.me(refresh=True)
+        if (m, path) == ("GET", "/v1/brief"):
+            return self.brief(q.get("budget"), co)
+        if (m, path) == ("POST", "/v1/permissions/check"):
+            return self.record_action(b.get("action"), b.get("detail"), b.get("amount"), b.get("unit"),
+                                      b.get("work_order"), co, b.get("assignment"), "attempted" if b.get("guard") else b.get("phase"))
+        if (m, path) == ("POST", "/v1/agents/receipts"):
+            return self.receipt(b.get("summary"), b.get("session"), b.get("work_order"), b.get("detail"), co,
+                                b.get("assignment"))
+        if (m, path) == ("POST", "/v1/agents/presence"):
+            return self.presence(b.get("session") or "live", co)
+        if (m, path) == ("GET", "/v1/work"):
+            return {"work_orders": self.work_list(q.get("all"), q.get("owner"), q.get("limit"), co)}
+        if (m, path) == ("POST", "/v1/work/next"):
+            return self.work_next(co)
+        if m == "GET" and path.startswith("/v1/work/"):
+            return self.work_show(urllib.parse.unquote(path[len("/v1/work/"):]), co)
+        if (m, path) == ("GET", "/v1/ask"):
+            return {"hits": self.search(q.get("q"), q.get("kind"), q.get("limit"), co, timeout)}
+        if (m, path) == ("POST", "/v1/ops"):
+            return {"results": [self._old_op(o) for o in (b.get("ops") or [])]}
+        raise RsError(404, f"{m} {path} has no equivalent on this ResultSpace server")
+
+    def _old_op(self, o: dict) -> dict:
+        """One entry of an old POST /v1/ops batch. Only `create` exists on the new server."""
+        act = o.get("action") or {}
+        if act.get("type") != "create":
+            return {"op_id": o.get("op_id"),
+                    "result": {"outcome": "rejected", "error": f"action {act.get('type')!r} is not supported"}}
+        try:
+            r = self.create_record(o.get("kind"), act.get("body") or {}, o.get("result"), o.get("why"),
+                                   o.get("company_id"), idempotency_key=o.get("op_id"))
+        except RsError as e:
+            if e.status in (400, 403, 404, 409):  # the server refused this record: say so, as before
+                return {"op_id": o.get("op_id"), "result": {"outcome": "rejected", "error": e.message}}
+            raise
+        return {"op_id": o.get("op_id"),
+                "result": {"outcome": "applied", "id": r.get("id"), "key": r.get("key"), "rev": r.get("rev")}}
+
+    def get(self, path: str, **query) -> Any:
+        return self.request("GET", path, query=query)
+
+    def post(self, path: str, body: Any = None) -> Any:
+        return self.request("POST", path, body=body if body is not None else {})
+
+
+class TTLCache:
+    """Tiny cache for activity logging."""
+
+    def __init__(self, ttl: float):
+        self.ttl = ttl
+        self._d: dict = {}
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        with self._lock:
+            v = self._d.get(key)
+            if v and v[0] > time.monotonic():
+                return v[1]
+            self._d.pop(key, None)
+            return None
+
+    def put(self, key, value):
+        with self._lock:
+            self._d[key] = (time.monotonic() + self.ttl, value)
+
+    def clear(self):
+        with self._lock:
+            self._d.clear()

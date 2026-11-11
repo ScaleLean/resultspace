@@ -8,9 +8,9 @@ import { RsError, type ErrorCode } from "../core/errors.ts";
 import { operations, run } from "../operations/index.ts";
 import { handleMcp } from "./mcp.ts";
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.2.0";
 const MAX_BODY = 40 * 1024 * 1024; // attachments travel as base64
-const STATUS: Record<ErrorCode, number> = { not_found: 404, forbidden: 403, invalid: 400, conflict: 409, read_only: 403 };
+const STATUS: Record<ErrorCode, number> = { not_found: 404, forbidden: 403, invalid: 400, conflict: 409 };
 
 export type Caller = { company: Company; actor: Actor };
 
@@ -50,8 +50,7 @@ export function callerOf(companies: Companies, req: IncomingMessage): Caller | u
 }
 
 /** What a client needs to build commands and tools: every operation with the JSON Schema of its input. */
-export const operationList = () =>
-  operations.map((o) => ({ name: o.name, summary: o.summary, role: o.role, write: o.write, input: o.input }));
+export const operationList = () => operations.map((o) => ({ name: o.name, summary: o.summary, role: o.role, write: o.write, input: o.input, ...(o.replacedBy ? { replaced_by: o.replacedBy } : {}) }));
 
 /**
  * Answer /health, /v1/* and /mcp. Returns false for any other path, so the web app can take it.
@@ -60,29 +59,17 @@ export const operationList = () =>
 export async function handleApi(companies: Companies, req: IncomingMessage, res: ServerResponse): Promise<boolean> {
   const url = new URL(req.url ?? "/", "http://x");
   const p = url.pathname;
-  if (p === "/health") {
-    send(res, 200, { ok: true, service: "resultspace", version: VERSION, readOnly: companies.readOnly });
-    return true;
-  }
+  if (p === "/health") { send(res, 200, { ok: true, service: "resultspace", version: VERSION }); return true; }
   if (p !== "/mcp" && !p.startsWith("/v1/")) return false;
   try {
     const caller = callerOf(companies, req);
-    if (!caller) {
-      send(res, 401, { error: { code: "unauthorized", message: "missing or invalid key" } });
-      return true;
-    }
-    if (p === "/mcp") {
-      await handleMcp(caller, req, res);
-      return true;
-    }
+    if (!caller) { send(res, 401, { error: { code: "unauthorized", message: "missing or invalid key" } }); return true; }
+    if (p === "/mcp") { await handleMcp(caller, req, res); return true; }
     if (p === "/v1/me" && req.method === "GET") {
       send(res, 200, { actor: caller.actor, company: { slug: caller.company.slug, name: caller.company.name }, version: VERSION });
       return true;
     }
-    if (p === "/v1/operations" && req.method === "GET") {
-      send(res, 200, { operations: operationList() });
-      return true;
-    }
+    if (p === "/v1/operations" && req.method === "GET") { send(res, 200, { operations: operationList() }); return true; }
     const m = /^\/v1\/op\/([a-z_.]+)$/.exec(p);
     if (m?.[1] && req.method === "POST") {
       const opId = req.headers["idempotency-key"];

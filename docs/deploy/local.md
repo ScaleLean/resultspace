@@ -11,10 +11,11 @@ node src/local.ts
 
 It prints the address (http://127.0.0.1:4390) and opens it. From this machine nobody signs in: the
 browser is the owner. First run asks for the company's name and, if you want the Curator, a Fireworks
-API key (https://fireworks.ai, Account → API Keys). Deterministic Curator evidence checks work without a model key; chat and semantic review require one.
+API key (https://fireworks.ai, Account → API Keys). Everything except the Curator works without a key.
 
 Data lives in `~/.local/share/resultspace/data`: one SQLite file per company (`<slug>.sqlite`), one
-for the Curator's conversations (`<slug>.agent.sqlite`), and `_system.sqlite` for people. For consistent backups and schema upgrades, use the quiesced whole-directory procedure in [MIGRATION.md](MIGRATION.md). A single-file live snapshot does not capture a consistent server state.
+for the Curator's conversations (`<slug>.agent.sqlite`), and `_system.sqlite` for people. Back it up
+by copying the directory while the server is stopped, or with `sqlite3 FILE 'vacuum into ...'` while it runs.
 
 ## Agents on the same machine
 
@@ -67,7 +68,3 @@ Hosted on the internet, every request signs in (`RS_TRUST=none`, or simply a hos
 loopback or tailnet). The `Dockerfile` builds a one-process image (`DATA_DIR=/data`, port 8080). A
 public install should still get a second factor and a content security policy, which ResultSpace does
 not provide yet: put it behind a VPN (Tailscale) or an authenticating proxy rather than on the open internet.
-
-## Historical migration reconciliation
-
-Enable `RS_READ_ONLY=1` in the existing server environment at the approved release window. Reads retain their existing keys, sessions and trust settings; mutations and background Curator work are refused. See [read-only activation, verification and rollback](READ-ONLY.md), including the limits on creating new browser sessions.
