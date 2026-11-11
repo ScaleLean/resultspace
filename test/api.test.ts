@@ -14,21 +14,12 @@ async function serve(t: TestContext) {
   addAgent(s.acme, "reader", "viewer");
   addAgent(s.other, "hermes:other");
   const keys = { acme: issueKey(s.acme, "hermes:acme"), reader: issueKey(s.acme, "reader"), other: issueKey(s.other, "hermes:other") };
-  const server = createServer(
-    (req, res) =>
-      void handleApi(s.companies, req, res).then((mine) => {
-        if (!mine) res.writeHead(404).end();
-      }),
-  );
+  const server = createServer((req, res) => void handleApi(s.companies, req, res).then((mine) => { if (!mine) res.writeHead(404).end(); }));
   await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
   t.after(() => server.close());
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const call = async (key: string | null, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => {
-    const r = await fetch(base + path, {
-      method,
-      headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), ...headers },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
+    const r = await fetch(base + path, { method, headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: r.status, body: (r.status === 202 ? {} : await r.json()) as Json };
   };
   return { ...s, keys, call };
@@ -68,234 +59,157 @@ test("api: errors carry a code, roles are enforced, repeats are safe", async (t)
 
 test("mcp: the operation list as tools, with the key's rights", async (t) => {
   const { keys, call } = await serve(t);
-  const rpc = (key: string, id: number | null, method: string, params: Json = {}) =>
-    call(key, "POST", "/mcp", { jsonrpc: "2.0", ...(id === null ? {} : { id }), method, params });
+  const rpc = (key: string, id: number | null, method: string, params: Json = {}) => call(key, "POST", "/mcp", { jsonrpc: "2.0", ...(id === null ? {} : { id }), method, params });
   const init = await rpc(keys.acme, 1, "initialize", { protocolVersion: "2025-06-18" });
   assert.equal(((init.body.result as Json).serverInfo as Json).name, "resultspace");
   assert.equal((await rpc(keys.acme, null, "notifications/initialized")).status, 202);
   const tools = ((await rpc(keys.acme, 2, "tools/list")).body.result as Json).tools as Json[];
   assert.ok(tools.some((x) => x.name === "record_search"));
-  const made = (await rpc(keys.acme, 3, "tools/call", { name: "record_create", arguments: { kind: "entry", body: { title: "From MCP" } } }))
-    .body.result as Json;
+  const made = (await rpc(keys.acme, 3, "tools/call", { name: "record_create", arguments: { kind: "entry", body: { title: "From MCP" } } })).body.result as Json;
   assert.equal(made.isError, false);
-  const refused = (await rpc(keys.reader, 4, "tools/call", { name: "record_create", arguments: { kind: "entry", body: { title: "x" } } }))
-    .body.result as Json;
+  const refused = (await rpc(keys.reader, 4, "tools/call", { name: "record_create", arguments: { kind: "entry", body: { title: "x" } } })).body.result as Json;
   assert.equal(refused.isError, true);
   assert.match(((refused.content as Json[])[0] as Json).text as string, /^forbidden/);
   assert.equal(((await rpc(keys.acme, 5, "nope")).body.error as Json).code, -32601);
   assert.equal((await call(null, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" })).status, 401);
 });
 
-test("log and project context credit a second authenticated editor while preserving the original assertion", async (t) => {
-  const { acme, keys, call } = await serve(t);
-  addAgent(acme, "editor", "member");
-  const editorKey = issueKey(acme, "editor");
-  const project = (await call(keys.acme, "POST", "/v1/op/record.create", { kind: "project", body: { title: "Launch" } })).body
-    .result as Json;
-  const original = (
-    await call(keys.acme, "POST", "/v1/op/journal.log", {
-      title: "Launch succeeded",
-      type: "outcome",
-      detail: "Supplier confirmed",
-      project: project.key,
-    })
-  ).body.result as Json;
-  const edited = await call(editorKey, "POST", "/v1/op/record.patch", {
-    ref: original.key,
-    set: { title: "Launch uncertain", type: "note", detail: "Supplier withdrew confirmation" },
-    why: "New supplier email",
-  });
-  assert.equal(edited.status, 200);
-  const log = (await call(keys.acme, "POST", "/v1/op/journal.list", { project: project.key })).body.result as Json[];
-  assert.equal(log[0]!.by, "editor");
-  assert.equal(log[0]!.type, "note");
-  assert.equal(log[0]!.title, "Launch uncertain");
-  assert.equal(log[0]!.detail, "Supplier withdrew confirmation");
-  assert.equal((log[0]!.original as Json).actor, "hermes:acme");
-  assert.equal(((log[0]!.original as Json).body as Json).title, "Launch succeeded");
-  assert.equal(((log[0]!.original as Json).body as Json).type, "outcome");
-  const context = (await call(keys.acme, "POST", "/v1/op/project.context", { ref: project.key })).body.result as Json;
-  const entry = (context.log as Json[])[0]!;
-  assert.equal((entry.provenance as Json).actor, "editor");
-  assert.equal((entry.provenance as Json).at, log[0]!.updated_at);
-  assert.equal(((entry.record as Json).body as Json).title, log[0]!.title);
-  const history = (await call(keys.acme, "POST", "/v1/op/record.history", { ref: original.key })).body.result as Json[];
-  assert.deepEqual(
-    history.map((r) => r.actor),
-    ["hermes:acme", "editor"],
-  );
-  assert.equal((history[0]!.body as Json).detail, "Supplier confirmed");
-  for (const input of [
-    { title: "Uncited learning", type: "learning" },
-    { title: "Whitespace citation", type: "learning", source: "  " },
-  ])
-    assert.equal((await call(keys.acme, "POST", "/v1/op/journal.log", input)).status, 400);
-  assert.equal((await call(editorKey, "POST", "/v1/op/record.patch", { ref: original.key, set: { type: "learning" } })).status, 400,
-    "generic patch cannot turn an unsourced note into learning");
-});
 
-test("canonical Journal scope rejects cross-project about/create/patch and keeps shared claim citations out of another log", async (t) => {
+test("API and MCP enforce assignment writes without trusting client-supplied context", async (t) => {
   const { acme, keys, call } = await serve(t);
-  const op = async (name: string, input: Json) => call(keys.acme, "POST", `/v1/op/${name}`, input);
-  const make = async (kind: string, body: Json) => (await op("record.create", { kind, body })).body.result as Json;
-  const a = await make("project", { title: "Project A" });
-  const b = await make("project", { title: "Project B" });
-  const fact = await make("fact", { title: "A fact", subject: "Supplier", predicate: "weeks", value_type: "number", value: 4, project_id: a.key });
-  const knowledge = await make("knowledge", { title: "A knowledge", body: "Scope A only", project_id: a.key });
-  for (const about of [a, fact, knowledge]) {
-    assert.equal((await op("journal.log", { title: "Bad scope", about: about.key, project: b.key })).status, 400);
-    assert.equal((await op("record.create", { kind: "entry", body: { title: "Bad generic scope", about_id: about.key, project_id: b.key } })).status, 400);
-    const entry = await make("entry", { title: "A event", about_id: about.key });
-    assert.equal((entry.body as Json).project_id, a.id);
-    assert.equal((await op("record.patch", { ref: entry.key, set: { project_id: b.key } })).status, 400);
-    assert.equal((await op("record.patch", { ref: entry.key, set: { about_id: b.key } })).status, 400);
-    assert.equal((await op("record.patch", { ref: entry.key, set: { title: `Mention ${String(b.key)}` } })).status, 200);
+  const a = rec(acme, admin, "record.create", { kind: "assignment", body: { title: "Count", owner: "hermes:acme" } });
+  addAgent(acme, "else");
+  const unrelated = issueKey(acme, "else");
+  addAgent(acme, "boss", "admin");
+  const boss = issueKey(acme, "boss");
+  for (const [name, input] of [
+    ["record.patch", { ref: a.key, set: { status: "done", result: "Finished" }, lifecycle: true, role: "admin" }],
+    ["record.patch", { ref: a.key, set: { title: "Changed", owner: "else" } }],
+    ["assignment.report", { ref: a.key, result: "Finished" }],
+    ["record.archive", { ref: a.key }],
+    ["record.restore", { ref: a.key }],
+  ] as const) {
+    const denied = await call(unrelated, "POST", `/v1/op/${name}`, input);
+    assert.equal(denied.status, 403, name);
+    assert.equal((denied.body.error as Json).code, "forbidden");
   }
-  assert.equal((await op("record.patch", { ref: fact.key, set: { project_id: b.key } })).status, 400, "claim move cannot contradict dependent Journal scope");
-  await op("record.patch", { ref: b.key, set: { fact_ids: [fact.key], knowledge_ids: [knowledge.key] } });
-  const context = async (ref: unknown) => (await op("project.context", { ref })).body.result as Json;
-  assert.equal(((await context(a.key)).log as Json[]).length, 3);
-  assert.deepEqual((await context(b.key)).log, []);
-  assert.equal(((await context(b.key)).facts as Json[]).length, 1, "a fact may be explicitly shared without sharing its Journal");
-  assert.deepEqual((await op("journal.list", { project: b.key })).body.result, []);
-  assert.equal((await op("record.patch", { ref: b.key, set: { current_state: "References JNL-0001" } })).status, 200);
-  assert.deepEqual((await context(b.key)).log, [], "incidental backlinks never change Journal scope");
+  for (const [name, input] of [
+    ["record_create", { kind: "work_order", body: { title: "X", owner: "hermes:acme", status: "done", _source: "alex" } }],
+    ["record_patch", { ref: a.key, set: { verification: "verified", verified_by: "alex" } }],
+  ] as const) {
+    const denied = (await call(boss, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: input } })).body.result as Json;
+    assert.equal(denied.isError, true);
+    assert.match((denied.content as Json[])[0]!.text as string, /^forbidden/);
+  }
+  assert.equal((await call(keys.acme, "POST", "/v1/op/assignment.report", { ref: a.key, result: "Counted 12" })).status, 200);
+  assert.equal((await call(boss, "POST", "/v1/op/assignment.verify", { ref: a.key, verdict: "verified" })).status, 403);
+  assert.equal((await call(boss, "POST", "/v1/op/record.undo", { ref: a.key })).status, 403);
+  assert.equal(rec(acme, admin, "record.get", { ref: a.key }).body.verification, undefined);
 });
 
-test("Journal scope anchors stay immutable for parent, child and transitive child through patch, undo and restore", async (t) => {
+test("API and MCP reject unrelated assignment outcomes and preserve owner reports", async (t) => {
   const { acme, keys, call } = await serve(t);
-  const op = (name: string, input: Json) => call(keys.acme, "POST", `/v1/op/${name}`, input);
-  const make = async (kind: string, body: Json) => {
-    const result = await op("record.create", { kind, body });
-    assert.equal(result.status, 200);
-    return result.body.result as Json;
-  };
-  const a = await make("project", { title: "Original scope" });
-  const b = await make("project", { title: "Other scope" });
-  const parent = await make("entry", { title: "Parent", about_id: a.key });
-  const child = await make("entry", { title: "Child", about_id: parent.key });
-  const descendant = await make("entry", { title: "Transitive child", about_id: child.key });
-  const anchored = [parent, child, descendant];
-  const visible = async () => {
-    for (const entry of anchored) {
-      const read = (await op("record.get", { ref: entry.key })).body.result as Json;
-      assert.equal((read.body as Json).project_id, a.id);
-      assert.equal((read.body as Json).about_id, (entry.body as Json).about_id);
+  addAgent(acme, "else");
+  const unrelated = issueKey(acme, "else");
+  const a = rec(acme, admin, "record.create", { kind: "assignment", body: { title: "Count", owner: "hermes:acme" } });
+  const outcome = rec(acme, admin, "record.create", { kind: "entry", body: { type: "outcome", title: "Checked", assignment_id: a.id } });
+  const task = rec(acme, admin, "record.create", { kind: "task", body: { title: "Step", assignment_id: a.id } });
+  for (const [name, input] of [
+    ["record.create", { kind: "entry", body: { type: "outcome", title: "Counted", assignment_id: a.key } }],
+    ["record.create", { kind: "entry", body: { type: "outcome", title: "Counted", work_order_id: a.id } }],
+    ["record.patch", { ref: outcome.key, set: { title: "Changed", assignment_id: null } }],
+    ["record.archive", { ref: outcome.key }],
+    ["record.restore", { ref: outcome.key }],
+    ["journal.log", { title: "Counted", about: a.key }],
+    ["record.patch", { ref: task.key, set: { title: "Changed" }, result: "Counted" }],
+  ] as const) {
+    const denied = await call(unrelated, "POST", `/v1/op/${name}`, input, { "idempotency-key": `outcome-denied-${name}` });
+    assert.equal(denied.status, 403, name);
+    assert.equal((denied.body.error as Json).code, "forbidden");
+  }
+  const denied = (await call(unrelated, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+    name: "record_create", arguments: { kind: "entry", body: { type: "outcome", title: "Counted", about_id: a.id } },
+  } })).body.result as Json;
+  assert.equal(denied.isError, true);
+  assert.match((denied.content as Json[])[0]!.text as string, /^forbidden/);
+  assert.equal(rec(acme, admin, "record.get", { ref: task.key }).rev, 1);
+  assert.equal(acme.all("select * from ops").length, 0);
+  assert.equal((await call(keys.acme, "POST", "/v1/op/assignment.report", { ref: a.key, result: "Counted 12" })).status, 200);
+  const shown = (await call(keys.acme, "POST", "/v1/op/assignment.show", { ref: a.key })).body.result as Json;
+  assert.equal(shown.result, "Counted 12");
+  assert.equal((shown.outcomes as Json[]).length, 2);
+});
+
+test("API task relinking and undo preserve historical outcome authority", async (t) => {
+  const { acme, keys, call } = await serve(t);
+  addAgent(acme, "else");
+  const otherKey = issueKey(acme, "else");
+  const a = rec(acme, admin, "record.create", { kind: "assignment", body: { title: "One", owner: "hermes:acme" } });
+  const b = rec(acme, admin, "record.create", { kind: "assignment", body: { title: "Two", owner: "else" } });
+  const task = rec(acme, admin, "record.create", { kind: "task", body: { title: "Step", assignment_id: a.id } });
+  const outcome = rec(acme, admin, "journal.log", { title: "Checked", about: task.key });
+  for (const key of [keys.acme, otherKey]) {
+    assert.equal((await call(key, "POST", "/v1/op/record.patch", { ref: task.key, set: { work_order_id: b.key } })).status, 403);
+  }
+  rec(acme, admin, "record.patch", { ref: task.key, set: { assignment_id: b.id } });
+  for (const key of [keys.acme, otherKey]) {
+    assert.equal((await call(key, "POST", "/v1/op/record.undo", { ref: task.key })).status, 403);
+    assert.equal((await call(key, "POST", "/v1/op/record.patch", { ref: outcome.key, set: { title: "Changed" } })).status, 403);
+    if (key === keys.acme) assert.equal((await call(key, "POST", "/v1/op/record.archive", { ref: task.key })).status, 403);
+  }
+  rec(acme, admin, "record.patch", { ref: task.key, set: { assignment_id: null } });
+  assert.equal((await call(otherKey, "POST", "/v1/op/record.patch", { ref: outcome.key, set: { assignment_id: b.key } })).status, 403);
+  assert.equal(rec(acme, admin, "record.get", { ref: outcome.key }).rev, 1);
+});
+
+test("API and MCP protect session/action evidence and all assignment task edits", async (t) => {
+  const { acme, keys, call } = await serve(t);
+  addAgent(acme, "else");
+  const otherKey = issueKey(acme, "else");
+  const a = rec(acme, admin, "record.create", { kind: "assignment", body: { title: "Count", owner: "hermes:acme" } });
+  const task = rec(acme, admin, "record.create", { kind: "task", body: { title: "Step", status: "todo", assignment_id: a.id } });
+  for (const type of ["session", "action"]) {
+    for (const link of [{ assignment_id: a.key }, { work_order_id: a.id }, { about_id: task.id }]) {
+      assert.equal((await call(otherKey, "POST", "/v1/op/record.create", { kind: "entry", body: { title: "Evidence", type, ...link } })).status, "about_id" in link ? 200 : 403);
     }
-    const context = (await op("project.context", { ref: a.key })).body.result as Json;
-    assert.deepEqual((context.log as Json[]).map(e => (e.record as Json).id).sort(), anchored.map(e => e.id).sort());
-    const log = (await op("journal.list", { project: a.key })).body.result as Json[];
-    assert.deepEqual(log.map(e => e.key).sort(), anchored.map(e => e.key).sort());
-    assert.deepEqual(((await op("project.context", { ref: b.key })).body.result as Json).log, []);
-    assert.deepEqual((await op("journal.list", { project: b.key })).body.result, []);
-  };
-  await visible();
-  for (const entry of anchored) {
-    for (const set of [
-      { project_id: b.key, about_id: b.key }, { project_id: null }, { about_id: null },
-      { about_id: entry.key }, { about_id: descendant.key },
-    ]) {
-      const attempt = await op("record.patch", { ref: entry.key, set });
-      assert.equal(attempt.status, 400);
-      assert.match(JSON.stringify(attempt.body), /immutable/);
-    }
+    const made = await call(keys.acme, "POST", "/v1/op/record.create", { kind: "entry", body: { title: "Owner evidence", type, assignment_id: a.key } });
+    assert.equal(made.status, 200);
+    const evidence = made.body.result as Json;
+    for (const [name, input] of [
+      ["record.patch", { ref: evidence.key, set: { title: "Changed" } }],
+      ["record.archive", { ref: evidence.key }], ["record.restore", { ref: evidence.key }],
+    ] as const) assert.equal((await call(otherKey, "POST", `/v1/op/${name}`, input)).status, 403);
   }
-  // Future/self references cannot create cycles; existing anchors cannot be changed to close a cycle.
-  assert.equal((await op("record.create", { kind: "entry", body: { title: "Forward cycle", about_id: "JNL-9999" } })).status, 400);
-  assert.equal((await op("record.create", { kind: "entry", body: { title: "Contradictory child", about_id: parent.key, project_id: b.key } })).status, 400);
-  assert.equal((await op("record.patch", { ref: parent.key, set: { title: "Content correction", detail: "Ordinary editing remains available" } })).status, 200);
-  assert.equal((await op("record.undo", { ref: parent.key })).status, 200, "content undo retains anchors");
-  await visible();
-
-  // Simulate an existing historical scope move and return, before anchors became immutable.
-  const current = (await op("record.get", { ref: parent.key })).body.result as Json;
-  const originalBody = current.body as Json;
-  for (const [i, body] of [{ ...originalBody, project_id: b.id, about_id: b.id }, originalBody].entries())
-    acme.run("insert into revisions(record_id,rev,body,archived,changed,op,actor,actor_kind,at) values (?,?,?,0,'[\"about_id\",\"project_id\"]','patch','historical-editor','person','2026-09-01')", String(parent.id), Number(current.rev) + i + 1, JSON.stringify(body));
-  acme.run("update records set rev=? where id=?", Number(current.rev) + 2, String(parent.id));
-  const beforeHistory = (await op("record.history", { ref: parent.key })).body.result;
-  const undo = await op("record.undo", { ref: parent.key });
-  assert.equal(undo.status, 400); assert.match(JSON.stringify(undo.body), /immutable/);
-  assert.deepEqual((await op("record.history", { ref: parent.key })).body.result, beforeHistory);
-  await visible();
-  assert.equal((await op("record.archive", { ref: parent.key })).status, 200);
-  assert.equal((await op("record.undo", { ref: parent.key })).status, 200, "archive undo restores without changing anchors");
-  await visible();
-  assert.equal((await op("record.archive", { ref: parent.key })).status, 200);
-  assert.equal((await op("record.restore", { ref: parent.key })).status, 200);
-  await visible();
-  const unscoped = await make("entry", { title: "Historical-compatible absent anchors" });
-  for (const set of [{ project_id: a.key }, { about_id: parent.key }])
-    assert.equal((await op("record.patch", { ref: unscoped.key, set })).status, 400, "absent anchors are immutable too");
-  assert.equal((await op("record.patch", { ref: parent.key, set: { project_id: a.key } })).status, 200, "same normalized anchor is a no-op");
-  await visible();
-  const correction = await make("entry", { title: "New attributed scope correction", about_id: b.key, detail: `Correction to ${String(parent.key)}` });
-  assert.equal(correction.updated_by, "hermes:acme");
-  assert.equal((correction.body as Json).project_id, b.id);
-  const originalContext = (await op("project.context", { ref: a.key })).body.result as Json;
-  assert.deepEqual(originalContext.scope_conflicts, []);
-  assert.deepEqual((originalContext.log as Json[]).map(e => (e.record as Json).id).sort(), anchored.map(e => e.id).sort());
+  for (const set of [{ title: "Changed" }, { status: "done" }]) {
+    const rpc = await call(otherKey, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "record_patch", arguments: { ref: task.key, set } } });
+    assert.equal((rpc.body.result as Json).isError, true);
+  }
+  assert.equal(rec(acme, admin, "record.get", { ref: task.key }).rev, 1);
+  const request = rec(acme, admin, "request.propose", { title: "Update the step", operation: "record.patch", input: { ref: task.key, set: { status: "done" } }, why: "Reviewed" });
+  rec(acme, admin, "request.decide", { ref: request.key, approve: true });
+  assert.equal(rec(acme, admin, "record.get", { ref: task.key }).body.status, "done");
+  assert.equal((await call(otherKey, "POST", "/v1/op/record.undo", { ref: task.key })).status, 403);
+  const shown = (await call(keys.acme, "POST", "/v1/op/assignment.show", { ref: a.key })).body.result as Json;
+  assert.equal((shown.sessions as Json[]).length, 1);
+  assert.equal((shown.actions as Json[]).length, 1);
 });
 
-test("historical null-project Journal chains anchor new descendants transitively without rewriting legacy rows", async (t) => {
+test("API shared-task writes survive member evidence attachments and benign note fanout", async (t) => {
   const { acme, keys, call } = await serve(t);
-  const { uuidv7 } = await import("../src/core/records.ts");
-  const op = (name: string, input: Json) => call(keys.acme, "POST", `/v1/op/${name}`, input);
-  const make = async (kind: string, body: Json) => {
-    const response = await op("record.create", { kind, body });
-    assert.equal(response.status, 200);
-    return response.body.result as Json;
-  };
-  const a = await make("project", { title: "Historical project A" });
-  const b = await make("project", { title: "Other project B" });
-  const legacy = (key: string, about: unknown) => {
-    const id = uuidv7(), body = JSON.stringify({ title: key, type: "note", about_id: about, project_id: null });
-    acme.run("insert into records values (?,?,'entry',1,?,0,'2026-09-01','2026-09-01','legacy-author')", id, key, body);
-    acme.run("insert into revisions(record_id,rev,body,archived,changed,op,actor,actor_kind,at) values (?,1,?,0,'[]','import','legacy-author','person','2026-09-01')", id, body);
-    acme.run("insert into links values (?,?,'about')", id, String(about));
-    return { id, key };
-  };
-  const parent = legacy("JNL-0901", a.id);
-  const legacyChild = legacy("JNL-0902", parent.id);
-  const legacyGrandchild = legacy("JNL-0903", legacyChild.id);
-  const snapshot = async () => Promise.all([parent, legacyChild, legacyGrandchild].map(async entry => [
-    (await op("record.get", { ref: entry.key })).body.result,
-    (await op("record.history", { ref: entry.key })).body.result,
-    ((await op("record.links", { ref: entry.key })).body.result as Json).out,
-  ]));
-  const parentBody = (await op("record.get", { ref: parent.key })).body.result as Json;
-  for (const [i, body] of [{ ...(parentBody.body as Json), project_id: a.id }, parentBody.body].entries())
-    acme.run("insert into revisions(record_id,rev,body,archived,changed,op,actor,actor_kind,at) values (?,?,?,0,'[\"project_id\"]','patch','historical-editor','person','2026-09-02')", parent.id, i + 2, JSON.stringify(body));
-  acme.run("update records set rev=3,updated_by='historical-editor',updated_at='2026-09-02' where id=?", parent.id);
-  const before = await snapshot();
-  const scopeUndo = await op("record.undo", { ref: parent.key });
-  assert.equal(scopeUndo.status, 400); assert.match(JSON.stringify(scopeUndo.body), /immutable/);
-  const child = await make("entry", { title: "New child", about_id: parent.key });
-  const grandchild = (await op("journal.log", { title: "New grandchild", about: child.key })).body.result as Json;
-  assert.equal((grandchild.body as Json).project_id, a.id);
-  const deeper = await make("entry", { title: "Child of unanchored historical grandchild", about_id: legacyGrandchild.key });
-  for (const entry of [child, deeper]) assert.equal((entry.body as Json).project_id, a.id);
-  const all = [parent, legacyChild, legacyGrandchild, child, grandchild, deeper];
-  const visible = async () => {
-    const context = (await op("project.context", { ref: a.key })).body.result as Json;
-    assert.deepEqual((context.log as Json[]).map(e => (e.record as Json).id).sort(), all.map(e => e.id).sort());
-    assert.deepEqual(context.scope_conflicts, []);
-    const log = (await op("journal.list", { project: a.key })).body.result as Json[];
-    assert.deepEqual(log.map(e => e.key).sort(), all.map(e => e.key).sort());
-    assert.deepEqual((await op("journal.list", { project: b.key })).body.result, []);
-    assert.deepEqual(((await op("project.context", { ref: b.key })).body.result as Json).log, []);
-  };
-  await visible();
-  for (const entry of [parent, legacyChild, legacyGrandchild]) {
-    assert.equal((await op("record.create", { kind: "entry", body: { title: "Conflicting explicit project", about_id: entry.key, project_id: b.key } })).status, 400);
-    assert.equal((await op("journal.log", { title: "Conflicting logged project", about: entry.key, project: b.key })).status, 400);
-    assert.equal((await op("record.patch", { ref: entry.key, set: { project_id: a.key } })).status, 400, "legacy null anchors stay immutable");
+  addAgent(acme, "else");
+  const otherKey = issueKey(acme, "else");
+  const a = rec(acme, admin, "record.create", { kind: "assignment", body: { title: "Own", owner: "hermes:acme" } });
+  const task = rec(acme, admin, "record.create", { kind: "task", body: { title: "Shared", status: "todo" } });
+  for (const type of ["outcome", "session", "action"]) {
+    const made = await call(keys.acme, "POST", "/v1/op/record.create", { kind: "entry", body: { title: "Evidence", type, assignment_id: a.id, about_id: task.id } });
+    assert.equal(made.status, 200);
+    const id = (made.body.result as Json).id;
+    assert.equal((await call(otherKey, "POST", "/v1/op/record.patch", { ref: task.id, set: { title: "Shared update", status: "done" } })).status, 200);
+    assert.equal((await call(keys.acme, "POST", "/v1/op/record.patch", { ref: id, set: { assignment_id: null, about_id: null } })).status, 200);
+    assert.equal((await call(otherKey, "POST", "/v1/op/record.patch", { ref: task.id, set: { title: "Detached update" } })).status, 200);
+    assert.equal((await call(otherKey, "POST", "/v1/op/record.patch", { ref: id, set: { title: "Changed", authority: [], assignment_ids: [] } })).status, 403);
   }
-  assert.deepEqual(await snapshot(), before, "historical bodies, keys, links and history are not rewritten");
-  for (const entry of [child, grandchild, deeper]) {
-    assert.equal((await op("record.patch", { ref: entry.key, set: { project_id: b.key, about_id: b.key } })).status, 400);
-    assert.equal((await op("record.patch", { ref: entry.key, set: { title: "Editable content" } })).status, 200);
-    assert.equal((await op("record.undo", { ref: entry.key })).status, 200);
-  }
-  await visible();
+  for (let n = 0; n < 130; n++) rec(acme, admin, "record.create", { kind: "entry", body: { title: `Note ${n}`, type: "note", about_id: task.id } });
+  for (const name of ["record.archive", "record.restore", "record.undo"])
+    assert.equal((await call(otherKey, "POST", `/v1/op/${name}`, { ref: task.id })).status, 200);
 });

@@ -1,726 +1,387 @@
-// Schemas 2/3/4 upgrade directly to 6; original work/assignment records remain read-only with their exact keys.
+// Schema 2 -> 3: work orders become assignments. The fixture is a company file written the way schema 2
+// stored it (kind work_order, keys WO-..., Journal entries with work_order_id), row by row, then opened.
 import assert from "node:assert/strict";
-import {
-  readFileSync,
-  copyFileSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-} from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { Actor } from "../src/core/agents.ts";
 import { addAgent } from "../src/core/agents.ts";
 import { Companies } from "../src/core/companies.ts";
-import { Company, companyFile } from "../src/core/company.ts";
+import { companyFile } from "../src/core/company.ts";
 import { NodeDb } from "../src/core/db.ts";
 import { RsError } from "../src/core/errors.ts";
 import type { Rec, Revision } from "../src/core/records.ts";
-import { UPGRADES } from "../src/core/schema.ts";
+import { BUILTIN_KINDS, DDL, UPGRADES } from "../src/core/schema.ts";
+import type { Assignment, Order } from "../src/operations/assignments.ts";
 import { run } from "../src/operations/index.ts";
 import type { JournalItem } from "../src/operations/views.ts";
-import { member, setup } from "./helpers.ts";
+import { setup } from "./helpers.ts";
 
 const admin: Actor = { kind: "person", name: "alex", role: "admin" };
 const agent: Actor = { kind: "agent", name: "hermes:acme", role: "member" };
 const stranger: Actor = { kind: "agent", name: "hermes:else", role: "member" };
-const code = (c: string) => (e: unknown) =>
-  e instanceof RsError && e.code === c;
+const code = (c: string) => (e: unknown) => e instanceof RsError && e.code === c;
 
-// Original built-in kinds, with schema 2 work orders under their old name.
-import { priorKinds } from "./fixtures/kinds.ts";
-const V2_KINDS = priorKinds.map((k) =>
-  k.kind === "assignment"
-    ? { ...k, kind: "work_order", prefix: "WO" }
-    : k.kind === "entry"
-      ? {
-          ...k,
-          refs: {
-            about_id: null,
-            project_id: "project",
-            work_order_id: "work_order",
-          },
-        }
-      : k,
-);
+// Schema 2's built-in kinds: today's, with the assignment kind under its old name.
+const V2_KINDS = BUILTIN_KINDS.map((k) =>
+  k.kind === "assignment" ? { ...k, kind: "work_order", prefix: "WO" }
+  : k.kind === "entry" ? { ...k, refs: { about_id: null, project_id: "project", work_order_id: "work_order" } } : k);
 
 const ID = {
-  project: "0190a000-0000-7000-8000-000000000001",
-  imported: "0190a000-0000-7000-8000-000000000002",
-  done: "0190a000-0000-7000-8000-000000000003",
-  open: "0190a000-0000-7000-8000-000000000004",
-  outcome: "0190a000-0000-7000-8000-000000000005",
-  action: "0190a000-0000-7000-8000-000000000006",
-  session: "0190a000-0000-7000-8000-000000000007",
-  note: "0190a000-0000-7000-8000-000000000008",
+  project: "0190a000-0000-7000-8000-000000000001", imported: "0190a000-0000-7000-8000-000000000002", done: "0190a000-0000-7000-8000-000000000003",
+  open: "0190a000-0000-7000-8000-000000000004", outcome: "0190a000-0000-7000-8000-000000000005", action: "0190a000-0000-7000-8000-000000000006",
+  session: "0190a000-0000-7000-8000-000000000007", note: "0190a000-0000-7000-8000-000000000008",
 };
 type Body = Record<string, unknown>;
-type Version = {
-  body: Body;
-  at: string;
-  by: string;
-  op?: string;
-  why?: string;
-};
+type Version = { body: Body; at: string; by: string; op?: string; why?: string };
 
 /** A schema-2 company file: an open work order, a finished one, an imported one, and linked outcome/action/session entries. */
-function schema2File(
-  dir: string,
-  slug: string,
-  extraKinds: { kind: string; prefix: string }[] = [],
-) {
+function schema2File(dir: string, slug: string, extraKinds: { kind: string; prefix: string }[] = []) {
   const db = new NodeDb(companyFile(dir, slug));
-  db.exec(
-    readFileSync(new URL("./fixtures/schema4.sql", import.meta.url), "utf8"),
-  );
+  db.exec(DDL);
   db.exec("drop table evidence_authority");
-  for (const [k, v] of [
-    ["slug", slug],
-    ["name", "Acme"],
-    ["schema_version", "2"],
-    ["created_at", "2026-09-01T00:00:00.000Z"],
-  ])
-    db.run("insert into meta (k, v) values (?, ?)", k!, v!);
-  for (const k of [
-    ...V2_KINDS,
-    ...extraKinds.map((x) => ({
-      ...x,
-      title_field: "title",
-      statuses: null,
-      refs: {},
-    })),
-  ])
-    db.run(
-      "insert into kinds (kind, prefix, title_field, statuses, refs) values (?, ?, ?, ?, ?)",
-      k.kind,
-      k.prefix,
-      k.title_field,
-      k.statuses ? JSON.stringify(k.statuses) : null,
-      JSON.stringify(k.refs),
-    );
-  db.run(
-    "insert into agents (name, role, active, created_at) values ('hermes:acme', 'member', 1, '2026-09-01T00:00:00.000Z')",
-  );
-  db.run(
-    "insert into agents (name, role, active, created_at) values ('hermes:else', 'member', 1, '2026-09-01T00:00:00.000Z')",
-  );
+  for (const [k, v] of [["slug", slug], ["name", "Acme"], ["schema_version", "2"], ["created_at", "2026-09-01T00:00:00.000Z"]]) db.run("insert into meta (k, v) values (?, ?)", k!, v!);
+  for (const k of [...V2_KINDS, ...extraKinds.map((x) => ({ ...x, title_field: "title", statuses: null, refs: {} }))])
+    db.run("insert into kinds (kind, prefix, title_field, statuses, refs) values (?, ?, ?, ?, ?)", k.kind, k.prefix, k.title_field, k.statuses ? JSON.stringify(k.statuses) : null, JSON.stringify(k.refs));
+  db.run("insert into agents (name, role, active, created_at) values ('hermes:acme', 'member', 1, '2026-09-01T00:00:00.000Z')");
+  db.run("insert into agents (name, role, active, created_at) values ('hermes:else', 'member', 1, '2026-09-01T00:00:00.000Z')");
   const put = (id: string, key: string, kind: string, versions: Version[]) => {
     const last = versions.at(-1)!;
-    db.run(
-      "insert into records (id, key, kind, rev, body, archived, created_at, updated_at, updated_by) values (?, ?, ?, ?, ?, 0, ?, ?, ?)",
-      id,
-      key,
-      kind,
-      versions.length,
-      JSON.stringify(last.body),
-      versions[0]!.at,
-      last.at,
-      last.by,
-    );
+    db.run("insert into records (id, key, kind, rev, body, archived, created_at, updated_at, updated_by) values (?, ?, ?, ?, ?, 0, ?, ?, ?)",
+      id, key, kind, versions.length, JSON.stringify(last.body), versions[0]!.at, last.at, last.by);
     let prev: Body = {};
     versions.forEach((v, i) => {
-      const changed = [
-        ...new Set([...Object.keys(prev), ...Object.keys(v.body)]),
-      ]
-        .filter((f) => JSON.stringify(prev[f]) !== JSON.stringify(v.body[f]))
-        .sort();
-      db.run(
-        "insert into revisions (record_id, rev, body, archived, changed, op, op_id, actor, actor_kind, at, why) values (?, ?, ?, 0, ?, ?, null, ?, ?, ?, ?)",
-        id,
-        i + 1,
-        JSON.stringify(v.body),
-        JSON.stringify(changed),
-        v.op ?? (i ? "patch" : "create"),
-        v.by,
-        v.by === "alex" ? "person" : "agent",
-        v.at,
-        v.why ?? null,
-      );
+      const changed = [...new Set([...Object.keys(prev), ...Object.keys(v.body)])].filter((f) => JSON.stringify(prev[f]) !== JSON.stringify(v.body[f])).sort();
+      db.run("insert into revisions (record_id, rev, body, archived, changed, op, op_id, actor, actor_kind, at, why) values (?, ?, ?, 0, ?, ?, null, ?, ?, ?, ?)",
+        id, i + 1, JSON.stringify(v.body), JSON.stringify(changed), v.op ?? (i ? "patch" : "create"), v.by, v.by === "alex" ? "person" : "agent", v.at, v.why ?? null);
       prev = v.body;
     });
-    db.run(
-      "insert into records_fts (id, key, title, body) values (?, ?, ?, ?)",
-      id,
-      key,
-      String(last.body.title ?? key),
-      Object.values(last.body)
-        .filter((x) => typeof x === "string")
-        .join("\n"),
-    );
+    db.run("insert into records_fts (id, key, title, body) values (?, ?, ?, ?)", id, key, String(last.body.title ?? key), Object.values(last.body).filter((x) => typeof x === "string").join("\n"));
   };
-  const link = (from: string, to: string, label: string) =>
-    db.run(
-      "insert into links (from_id, to_id, label) values (?, ?, ?)",
-      from,
-      to,
-      label,
-    );
+  const link = (from: string, to: string, label: string) => db.run("insert into links (from_id, to_id, label) values (?, ?, ?)", from, to, label);
 
-  put(ID.project, "PRJ-0001", "project", [
-    {
-      body: { title: "Launch", status: "active" },
-      at: "2026-09-01T10:00:00.000Z",
-      by: "alex",
-    },
-  ]);
+  put(ID.project, "PRJ-0001", "project", [{ body: { title: "Launch", status: "active" }, at: "2026-09-01T10:00:00.000Z", by: "alex" }]);
   // Imported from the old system with a three-digit key, finished long ago.
-  put(ID.imported, "WO-001", "work_order", [
-    {
-      body: {
-        title: "Old audit",
-        owner: "curator",
-        status: "done",
-        result: "Audit filed",
-      },
-      at: "2026-08-01T10:00:00.000Z",
-      by: "import",
-      op: "import",
-    },
-  ]);
-  const done = {
-    title: "Check label",
-    owner: "hermes:acme",
-    brief: "Compare with the formula",
-    project_id: ID.project,
-  };
+  put(ID.imported, "WO-001", "work_order", [{ body: { title: "Old audit", owner: "curator", status: "done", result: "Audit filed" }, at: "2026-08-01T10:00:00.000Z", by: "import", op: "import" }]);
+  const done = { title: "Check label", owner: "hermes:acme", brief: "Compare with the formula", project_id: ID.project };
   put(ID.done, "WO-0001", "work_order", [
-    {
-      body: { ...done, status: "queued" },
-      at: "2026-09-02T10:00:00.000Z",
-      by: "alex",
-    },
-    {
-      body: { ...done, status: "picked_up" },
-      at: "2026-09-02T11:00:00.000Z",
-      by: "hermes:acme",
-    },
-    {
-      body: { ...done, status: "in_progress" },
-      at: "2026-09-02T11:05:00.000Z",
-      by: "hermes:acme",
-    },
-    {
-      body: { ...done, status: "done", result: "Label matches the formula" },
-      at: "2026-09-02T12:00:00.000Z",
-      by: "hermes:acme",
-    },
+    { body: { ...done, status: "queued" }, at: "2026-09-02T10:00:00.000Z", by: "alex" },
+    { body: { ...done, status: "picked_up" }, at: "2026-09-02T11:00:00.000Z", by: "hermes:acme" },
+    { body: { ...done, status: "in_progress" }, at: "2026-09-02T11:05:00.000Z", by: "hermes:acme" },
+    { body: { ...done, status: "done", result: "Label matches the formula" }, at: "2026-09-02T12:00:00.000Z", by: "hermes:acme" },
   ]);
-  const open = {
-    title: "Pause dead campaigns",
-    owner: "hermes:acme",
-    brief: "Pause campaigns with spend and no sales",
-    due_on: "2026-12-01",
-  };
+  const open = { title: "Pause dead campaigns", owner: "hermes:acme", brief: "Pause campaigns with spend and no sales", due_on: "2026-12-01" };
   put(ID.open, "WO-0002", "work_order", [
-    {
-      body: { ...open, status: "queued" },
-      at: "2026-09-03T10:00:00.000Z",
-      by: "alex",
-    },
-    {
-      body: { ...open, status: "picked_up" },
-      at: "2026-09-03T11:00:00.000Z",
-      by: "hermes:acme",
-    },
-    {
-      body: { ...open, status: "in_progress", progress: "Listed 3 campaigns" },
-      at: "2026-09-03T11:30:00.000Z",
-      by: "hermes:acme",
-    },
+    { body: { ...open, status: "queued" }, at: "2026-09-03T10:00:00.000Z", by: "alex" },
+    { body: { ...open, status: "picked_up" }, at: "2026-09-03T11:00:00.000Z", by: "hermes:acme" },
+    { body: { ...open, status: "in_progress", progress: "Listed 3 campaigns" }, at: "2026-09-03T11:30:00.000Z", by: "hermes:acme" },
   ]);
-  put(ID.outcome, "JNL-0001", "entry", [
-    {
-      body: {
-        type: "outcome",
-        title: "Label matches the formula",
-        about_id: ID.done,
-        project_id: ID.project,
-        work_order_id: ID.done,
-      },
-      at: "2026-09-02T12:00:00.000Z",
-      by: "hermes:acme",
-    },
-  ]);
-  put(ID.action, "JNL-0002", "entry", [
-    {
-      body: {
-        type: "action",
-        title: "Paused campaign 12",
-        action: "ads",
-        about_id: ID.open,
-        work_order_id: ID.open,
-      },
-      at: "2026-09-03T11:40:00.000Z",
-      by: "hermes:acme",
-    },
-  ]);
-  put(ID.session, "JNL-0003", "entry", [
-    {
-      body: {
-        type: "session",
-        title: "3 steps: ads API ok",
-        session: "s1",
-        about_id: ID.open,
-        work_order_id: ID.open,
-      },
-      at: "2026-09-03T11:45:00.000Z",
-      by: "hermes:acme",
-    },
-  ]);
-  put(ID.note, "JNL-0004", "entry", [
-    {
-      body: { type: "note", title: "See WO-0001 for the label check" },
-      at: "2026-09-04T09:00:00.000Z",
-      by: "alex",
-    },
-  ]);
+  put(ID.outcome, "JNL-0001", "entry", [{ body: { type: "outcome", title: "Label matches the formula", about_id: ID.done, project_id: ID.project, work_order_id: ID.done }, at: "2026-09-02T12:00:00.000Z", by: "hermes:acme" }]);
+  put(ID.action, "JNL-0002", "entry", [{ body: { type: "action", title: "Paused campaign 12", action: "ads", about_id: ID.open, work_order_id: ID.open }, at: "2026-09-03T11:40:00.000Z", by: "hermes:acme" }]);
+  put(ID.session, "JNL-0003", "entry", [{ body: { type: "session", title: "3 steps: ads API ok", session: "s1", about_id: ID.open, work_order_id: ID.open }, at: "2026-09-03T11:45:00.000Z", by: "hermes:acme" }]);
+  put(ID.note, "JNL-0004", "entry", [{ body: { type: "note", title: "See WO-0001 for the label check" }, at: "2026-09-04T09:00:00.000Z", by: "alex" }]);
   link(ID.done, ID.project, "project");
-  for (const [from, to] of [
-    [ID.outcome, ID.done],
-    [ID.action, ID.open],
-    [ID.session, ID.open],
-  ] as const) {
-    link(from, to, "about");
-    link(from, to, "work_order");
-  }
+  for (const [from, to] of [[ID.outcome, ID.done], [ID.action, ID.open], [ID.session, ID.open]] as const) { link(from, to, "about"); link(from, to, "work_order"); }
   link(ID.outcome, ID.project, "project");
   link(ID.note, ID.done, "cites");
-  for (const [p, n] of [
-    ["PRJ", 2],
-    ["WO", 3],
-    ["JNL", 5],
-  ] as const)
-    db.run("insert into key_counters (prefix, next_n) values (?, ?)", p, n);
-  db.run(
-    "insert into ops (op_id, actor, request_hash, outcome, at) values ('op-claim-0001', 'hermes:acme', 'h', ?, '2026-09-03T11:00:00.000Z')",
-    JSON.stringify({
-      work_order: { key: "WO-0002", status: "picked_up" },
-      claimed: true,
-    }),
-  );
+  for (const [p, n] of [["PRJ", 2], ["WO", 3], ["JNL", 5]] as const) db.run("insert into key_counters (prefix, next_n) values (?, ?)", p, n);
+  db.run("insert into ops (op_id, actor, request_hash, outcome, at) values ('op-claim-0001', 'hermes:acme', 'h', ?, '2026-09-03T11:00:00.000Z')",
+    JSON.stringify({ work_order: { key: "WO-0002", status: "picked_up" }, claimed: true }));
   db.close();
 }
 
-const dump = (dir: string) => {
+function world(t: TestContext, extraKinds: { kind: string; prefix: string }[] = []) {
+  const dir = mkdtempSync(join(tmpdir(), "rs-mig-"));
+  schema2File(dir, "acme", extraKinds);
+  const companies = new Companies(dir);
+  t.after(() => { companies.close(); rmSync(dir, { recursive: true, force: true }); });
+  return { dir, companies };
+}
+
+/** Everything the upgrade must not change, read straight from the file. */
+const snapshot = (dir: string) => {
   const db = new NodeDb(companyFile(dir, "acme"), { readOnly: true });
   try {
-    return Object.fromEntries(
-      [
-        "records",
-        "revisions",
-        "ops",
-        "key_counters",
-        "links",
-        "blobs",
-        "agents",
-        "agent_keys",
-        "records_fts",
-      ].map((table) => [table, db.all(`select * from ${table} order by 1`)]),
-    );
-  } finally {
-    db.close();
-  }
-};
-for (const version of [2, 3, 4])
-  test(`schema ${version} -> 6 preserves all content and supports backup/restore and rollback`, async (t) => {
-    const dir = mkdtempSync(join(tmpdir(), "rs-migrate5-"));
-    const source = join(dir, "source");
-    mkdirSync(source);
-    schema2File(source, "acme");
-    t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const db = new NodeDb(companyFile(source, "acme"));
-    if (version >= 3) {
-      db.run(
-        "insert into kinds values ('assignment','ASG','title',null,'{\"project_id\":\"project\"}')",
-      );
-      db.run("update records set kind='assignment' where kind='work_order'");
-      db.run("delete from kinds where kind='work_order'");
-      db.run(
-        'update kinds set refs = \'{"about_id":null,"project_id":"project","assignment_id":"assignment"}\' where kind=\'entry\'',
-      );
-      db.run(
-        "update records set body=json_set(json_remove(body,'$.work_order_id'),'$.assignment_id',json_extract(body,'$.work_order_id')) where json_type(body,'$.work_order_id') is not null",
-      );
-      db.run("update links set label='assignment' where label='work_order'");
-    }
-    if (version === 4)
-      db.exec(
-        "create table evidence_authority(record_id text primary key references records(id),assignment_ids text not null) strict;",
-      );
-    if (version === 4)
-      db.run(
-        "insert into evidence_authority values (?,?)",
-        ID.outcome,
-        JSON.stringify([ID.done]),
-      );
-    db.run(
-      "insert into presence values ('hermes:acme','session-1','2026-10-01')",
-    );
-    db.run(
-      "insert into blobs values ('abc',3,?,'2026-10-01')",
-      Buffer.from("abc"),
-    );
-    db.run("update meta set v=? where k='schema_version'", String(version));
-    db.exec("pragma wal_checkpoint(truncate)");
-    db.close();
-    const credential = "rsk_acme_" + "a".repeat(32);
-    const { createHash } = await import("node:crypto");
-    const credentialsDb = new NodeDb(companyFile(source, "acme"));
-    credentialsDb.run(
-      "insert into agent_keys values (?,'hermes:acme','2026-10-01',null)",
-      createHash("sha256").update(credential).digest("hex"),
-    );
-    for (const [kind, key] of [
-      ["task", "TSK-0001"],
-      ["skill", "SKL-0001"],
-      ["request", "REQ-0001"],
-      ["goal", "GOAL-0001"],
-      ["custom_claim", "CLM-0001"],
-    ]) {
-      if (kind === "custom_claim")
-        credentialsDb.run(
-          "insert into kinds values ('custom_claim','CLM','title',null,'{}')",
-        );
-      const id =
-        "0190a000-0000-7000-8000-" +
-        String(
-          100 +
-            ["task", "skill", "request", "goal", "custom_claim"].indexOf(kind!),
-        ).padStart(12, "0");
-      const body = JSON.stringify({
-        title: "Historical " + kind,
-        meaning: "Preserve original claim and lifecycle",
-        status: "draft",
-      });
-      credentialsDb.run(
-        "insert into records values (?,?,?,1,?,0,'2026-10-01','2026-10-01','alex')",
-        id,
-        key!,
-        kind!,
-        body,
-      );
-      credentialsDb.run(
-        "insert into revisions(record_id,rev,body,archived,changed,op,actor,actor_kind,at) values (?,1,?,0,'[\"title\"]','create','alex','person','2026-10-01')",
-        id,
-        body,
-      );
-    }
-    credentialsDb.close();
-    const before = dump(source);
-    const { backupDirectory, restoreDirectory } = await import(
-      "../src/core/backup.ts"
-    );
-    const prior = join(dir, "prior");
-    await backupDirectory(source, prior, true);
-    const companies = new Companies(source);
-    const co = companies.get("acme");
-    assert.equal(
-      co.one<{ v: string }>("select v from meta where k='schema_version'")!.v,
-      "6",
-    );
-    assert.deepEqual(
-      dump(source),
-      before,
-      "all current records, complete revisions, links, credentials, blobs, counters and op outcomes are unchanged",
-    );
-    const archived = run(co, admin, "archive.list", {}) as Rec[];
-    assert.equal(archived.length, 10);
-    assert.equal(companies.authenticate(credential)?.actor.name, agent.name);
-    assert.equal(
-      (run(co, admin, "record.get", { ref: "WO-0001" }) as Rec).body.result,
-      "Label matches the formula",
-    );
-    assert.equal(
-      (run(co, admin, "record.history", { ref: "WO-0001" }) as Revision[])
-        .length,
-      4,
-    );
-    for (const ref of ["WO-0001", "JNL-0002"])
-      for (const [operation, input] of [
-        ["record.patch", { ref, set: { title: "x" } }],
-        ["record.archive", { ref }],
-        ["record.restore", { ref }],
-        ["record.undo", { ref }],
-      ] as const)
-        assert.throws(
-          () => run(co, admin, operation, input),
-          code("forbidden"),
-        );
-    assert.throws(
-      () => co.run("update records set body='{}' where key='WO-0001'"),
-      /read-only/,
-    );
-    assert.equal(
-      co.one<{ agent: string }>("select * from legacy_presence")?.agent,
-      "hermes:acme",
-    );
-    if (version === 4)
-      assert.deepEqual(
-        JSON.parse(
-          co.one<{ assignment_ids: string }>(
-            "select * from legacy_evidence_authority",
-          )!.assignment_ids,
-        ),
-        [ID.done],
-      );
-    const project = run(co, agent, "project.context", { ref: "PRJ-0001" }) as {
-      log: { record: Rec }[];
+    return {
+      records: db.all<Record<string, unknown>>("select id, key, rev, created_at, updated_at, updated_by, archived, json_remove(body, '$.work_order_id', '$.assignment_id') as body from records order by key"),
+      revisions: db.all<Record<string, unknown>>("select * from revisions order by seq"),
+      ops: db.all<Record<string, unknown>>("select * from ops"),
+      counters: db.all<Record<string, unknown>>("select * from key_counters order by prefix"),
+      version: db.one<{ v: string }>("select v from meta where k = 'schema_version'")?.v,
     };
-    assert.deepEqual(
-      project.log.map((e) => e.record.key),
-      ["JNL-0001"],
-    );
-    assert.throws(
-      () =>
-        run(companies.create("other", "Other"), agent, "record.get", {
-          ref: ID.done,
-        }),
-      code("not_found"),
-    );
-    companies.close();
-    const afterBackup = join(dir, "after-backup");
-    await backupDirectory(source, afterBackup, true);
-    const restored = join(dir, "restored");
-    restoreDirectory(afterBackup, restored);
-    assert.deepEqual(dump(restored), before);
-    const again = new Companies(restored);
-    assert.equal(
-      (run(again.get("acme"), admin, "archive.list", {}) as Rec[]).length,
-      10,
-    );
-    again.close();
-    const rollback = join(dir, "rollback");
-    restoreDirectory(prior, rollback);
-    assert.deepEqual(dump(rollback), before);
-    const rollbackDb = new NodeDb(companyFile(rollback, "acme"), {
-      readOnly: true,
+  } finally { db.close(); }
+};
+
+test("entry authority reconstruction keeps detached intervals separate across fresh and prior schemas", async (t) => {
+  for (const gaps of [1, 3]) {
+    await t.test(`${gaps} detached interval(s)`, async (t) => {
+      const { acme, companies, dir } = setup(t);
+      addAgent(acme, agent.name);
+      addAgent(acme, stranger.name);
+      const make = (kind: string, body: Body) => run(acme, admin, "record.create", { kind, body }) as Rec;
+      const original = make("assignment", { title: "Original", owner: agent.name });
+      const unrelated = make("assignment", { title: "Other", owner: stranger.name });
+      const task = make("task", { title: "Step", assignment_id: original.id });
+      const entry = make("entry", { title: "Result", type: "outcome", about_id: task.id });
+      const edit = (ref: string, set: Body) => run(acme, admin, "record.patch", { ref, set });
+      for (let gap = 0; gap < gaps; gap++) {
+        edit(entry.id, { about_id: null });
+        if (gaps === 3) {
+          const detached = run(acme, admin, "record.get", { ref: entry.id }) as Rec;
+          acme.run("update records set rev = ? where id = ?", detached.rev + 1, entry.id);
+          acme.run(`insert into revisions (record_id, rev, body, archived, changed, op, actor, actor_kind, at)
+            values (?, ?, ?, 0, '["about_id"]', 'patch', ?, 'person', ?)`, entry.id, detached.rev + 1,
+            JSON.stringify({ ...detached.body, about_id: null }), admin.name, detached.updated_at);
+        }
+        edit(task.id, { assignment_id: null });
+        if (gaps === 3) {
+          // A prior server could store the old link name in an append-only revision.
+          const current = run(acme, admin, "record.get", { ref: task.id }) as Rec;
+          const body = JSON.stringify({ ...current.body, work_order_id: unrelated.id });
+          acme.run("update records set rev = ?, body = ? where id = ?", current.rev + 1,
+            JSON.stringify({ ...current.body, assignment_id: unrelated.id }), task.id);
+          acme.run(`insert into revisions (record_id, rev, body, archived, changed, op, actor, actor_kind, at)
+            values (?, ?, ?, 0, '["work_order_id"]', 'patch', ?, 'person', ?)`,
+            task.id, current.rev + 1, body, admin.name, current.updated_at);
+          edit(task.id, { work_order_id: null });
+        } else {
+          edit(task.id, { assignment_id: unrelated.id });
+          edit(task.id, { assignment_id: null });
+        }
+        // Reattachment while shared must retain only the original entry authority.
+        edit(entry.id, { about_id: task.id });
+      }
+      acme.run("pragma wal_checkpoint(truncate)");
+      companies.close();
+      const source = companyFile(dir, "acme");
+      for (const variant of ["fresh", "cache-missing", "schema-3"] as const) {
+        await t.test(variant, () => {
+          const target = join(dir, variant);
+          mkdirSync(target);
+          copyFileSync(source, companyFile(target, "acme"));
+          if (variant !== "fresh") {
+            const db = new NodeDb(companyFile(target, "acme"));
+            if (variant === "schema-3") {
+              db.exec("drop table evidence_authority");
+              db.run("update meta set v = '3' where k = 'schema_version'");
+            } else db.run("delete from evidence_authority");
+            db.close();
+          }
+          const reopened = new Companies(target);
+          t.after(() => reopened.close());
+          const co = reopened.get("acme");
+          assert.throws(() => run(co, stranger, "record.patch", { ref: entry.id, set: { title: "Unrelated edit" } }), code("forbidden"));
+          const edited = run(co, agent, "record.patch", { ref: entry.id, set: { title: "Owner edit" } }) as Rec;
+          assert.equal(edited.updated_by, agent.name);
+          assert.deepEqual(JSON.parse(co.one<{ assignment_ids: string }>("select assignment_ids from evidence_authority where record_id = ?", entry.id)!.assignment_ids), [original.id]);
+          assert.throws(() => run(co, stranger, "record.archive", { ref: entry.id }), code("forbidden"));
+        });
+      }
     });
-    assert.equal(
-      rollbackDb.one<{ v: string }>(
-        "select v from meta where k='schema_version'",
-      )!.v,
-      String(version),
-    );
-    rollbackDb.close();
-    const { readdirSync } = await import("node:fs");
-    assert.ok(
-      readdirSync(source).some((f) => f.includes(".pre-schema-6-")),
-      "automatic pre-upgrade snapshot",
-    );
-  });
-
-test("migration collision rolls back every schema change and preserves original file", async (t) => {
-  for (const [extra, message] of [
-    [{ kind: "assessment", prefix: "FCT" }, /prefix FCT/],
-    [{ kind: "fact", prefix: "CUSTOM" }, /kind fact already exists/],
-    [{ kind: "issue_note", prefix: "CUSTOM" }, /kind issue_note already exists/],
-    [{ kind: "custom_note", prefix: "ISN" }, /prefix ISN/],
-  ] as const) {
-    const dir = mkdtempSync(join(tmpdir(), "rs-collision-"));
-    t.after(() => rmSync(dir, { recursive: true, force: true }));
-    schema2File(dir, "acme", [extra]);
-    const before = dump(dir);
-    const companies = new Companies(dir);
-    t.after(() => companies.close());
-    assert.throws(() => companies.get("acme"), message);
-    assert.deepEqual(dump(dir), before);
-    const db = new NodeDb(companyFile(dir, "acme"), { readOnly: true });
-    assert.equal(
-      db.one<{ v: string }>("select v from meta where k='schema_version'")!.v,
-      "2",
-    );
-    assert.equal(
-      db.one("select 1 from sqlite_master where name='legacy_records'"),
-      undefined,
-    );
-    db.close();
   }
 });
 
-test("backup captures WAL; restore rejects tampering and refuses existing destinations", async (t) => {
-  const { dir, acme } = setup(t);
-  const { backupDirectory, restoreDirectory } = await import(
-    "../src/core/backup.ts"
-  );
-  const backup = join(tmpdir(), `rs-backup-${crypto.randomUUID()}`);
-  const restored = backup + "-restored";
-  t.after(() => {
-    rmSync(backup, { recursive: true, force: true });
-    rmSync(restored, { recursive: true, force: true });
-  });
-  run(acme, admin, "record.create", {
-    kind: "knowledge",
-    body: { title: "Committed in WAL", body: "preserve me" },
-  });
-  await assert.rejects(backupDirectory(dir, backup, false), /quiesced/);
-  await backupDirectory(dir, backup, true);
-  restoreDirectory(backup, restored);
-  const co = Company.open(restored, "acme");
-  assert.equal(
-    (run(co, admin, "record.get", { ref: "KNW-0001" }) as Rec).body.body,
-    "preserve me",
-  );
-  co.close();
-  assert.throws(() => restoreDirectory(backup, restored), /must be new/);
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(join(backup, "acme.sqlite"), "corrupt");
-  assert.throws(
-    () => restoreDirectory(backup, backup + "-bad"),
-    /verification failed/,
-  );
-});
-
-test("directory rehearsal preserves account sessions and Curator databases alongside companies", async (t) => {
-  const { dir, acme } = setup(t);
-  const { People } = await import("../src/core/people.ts");
-  const { backupDirectory, restoreDirectory } = await import(
-    "../src/core/backup.ts"
-  );
-  const people = People.open(dir);
-  await people.add("alex", "alex@example.test", {
-    password: "disposable-long-passphrase",
-  });
-  const token = await people.signIn(
-    "alex@example.test",
-    "disposable-long-passphrase",
-    "127.0.0.1",
-  );
-  assert.ok(token);
-  const agentDb = new NodeDb(join(dir, "acme.agent.sqlite"));
-  agentDb.exec(
-    "create table transcript (text text); insert into transcript values ('Curator evidence conversation');",
-  );
-  agentDb.close();
-  run(acme, member, "journal.log", {
-    title: "Sourced learning",
-    source: "Review notes",
-  });
-  const backup = join(tmpdir(), `rs-directory-${crypto.randomUUID()}`);
-  const restored = backup + "-restored";
-  t.after(() => {
-    people.close();
-    rmSync(backup, { recursive: true, force: true });
-    rmSync(restored, { recursive: true, force: true });
-  });
-  const manifest = await backupDirectory(dir, backup, true);
-  assert.ok(manifest.files["_system.sqlite"]);
-  assert.ok(manifest.files["acme.agent.sqlite"]);
-  restoreDirectory(backup, restored);
-  const accounts = People.open(restored);
-  assert.equal(accounts.session(token)?.name, "alex");
-  accounts.close();
-  const database = new NodeDb(join(restored, "acme.agent.sqlite"), {
-    readOnly: true,
-  });
-  assert.equal(
-    database.one<{ text: string }>("select text from transcript")?.text,
-    "Curator evidence conversation",
-  );
-  database.close();
-});
-
-test("schema 4 issue/ISS collision: four synthetic historical records survive archive, isolation and rollback", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "rs-issue-collision-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const source = join(dir, "source"); mkdirSync(source);
-  schema2File(source, "acme");
-  const db = new NodeDb(companyFile(source, "acme"));
-  db.exec(readFileSync(new URL("./fixtures/schema4-issue-collision.sql", import.meta.url), "utf8"));
-  db.close();
-  const before = dump(source);
-  const { backupDirectory, restoreDirectory } = await import("../src/core/backup.ts");
-  const prior = join(dir, "prior"); await backupDirectory(source, prior, true);
-  const companies = new Companies(source), co = companies.get("acme");
-  assert.deepEqual(dump(source), before, "migration leaves records, bodies, revisions, keys, links and counters byte-for-byte unchanged");
-  for (let n = 1; n <= 4; n++) {
-    const ref = `ISS-${String(n).padStart(4, "0")}`;
-    assert.equal((run(co, admin, "record.get", { ref }) as Rec).kind, "issue");
-    assert.equal((run(co, admin, "record.history", { ref }) as Revision[]).length, 2);
-    assert.throws(() => run(co, admin, "record.patch", { ref, set: { title: "rewrite" } }), code("forbidden"));
+test("legacy authority resolves both assignment aliases before comparing them", async (t) => {
+  for (const variant of ["equivalent", "different", "unresolved-primary", "unresolved-legacy", "wrong-kind"] as const) {
+    await t.test(variant, (t) => {
+      const { acme, companies, dir } = setup(t);
+      addAgent(acme, agent.name);
+      addAgent(acme, stranger.name);
+      const make = (kind: string, body: Body) => run(acme, admin, "record.create", { kind, body }) as Rec;
+      const assignment = make("assignment", { title: "Original", owner: agent.name });
+      const other = make("assignment", { title: "Other", owner: stranger.name });
+      const entry = make("entry", { title: "Legacy result", type: "outcome", assignment_id: assignment.id });
+      const historical = JSON.stringify({ ...entry.body,
+        assignment_id: variant === "unresolved-primary" ? "ASG-9999" : assignment.id,
+        work_order_id: variant === "different" ? other.key : variant === "unresolved-legacy" ? "ASG-9999"
+          : variant === "wrong-kind" ? entry.key : assignment.key });
+      // Append a prior-format revision without altering any existing history. Migration leaves
+      // this body untouched while the current record already has its canonical link.
+      acme.run("update records set rev = 2 where id = ?", entry.id);
+      acme.run(`insert into revisions (record_id, rev, body, archived, changed, op, actor, actor_kind, at)
+        values (?, 2, ?, 0, '["work_order_id"]', 'patch', ?, 'person', ?)`,
+        entry.id, historical, admin.name, entry.updated_at);
+      acme.run("drop table evidence_authority");
+      acme.run("update meta set v = '3' where k = 'schema_version'");
+      companies.close();
+      const reopened = new Companies(dir);
+      t.after(() => reopened.close());
+      const co = reopened.get("acme");
+      for (const actor of [agent, admin]) {
+        co.run("delete from evidence_authority where record_id = ?", entry.id);
+        const edit = () => run(co, actor, "record.patch", { ref: entry.id, set: { title: `${actor.name} edited` } });
+        if (variant === "equivalent") {
+          assert.equal((edit() as Rec).updated_by, actor.name);
+          assert.deepEqual(JSON.parse(co.one<{ assignment_ids: string }>("select assignment_ids from evidence_authority where record_id = ?", entry.id)!.assignment_ids), [assignment.id]);
+          assert.throws(() => run(co, stranger, "record.patch", { ref: entry.id, set: { title: "Unrelated edit" } }), code("forbidden"));
+        } else {
+          assert.throws(edit, code(variant === "different" ? "invalid" : "forbidden"));
+          assert.equal((run(co, admin, "record.get", { ref: entry.id }) as Rec).rev, 2);
+          assert.equal(co.one("select * from evidence_authority where record_id = ?", entry.id), undefined);
+        }
+      }
+      assert.equal(co.one<{ body: string }>("select body from revisions where record_id = ? and rev = 2", entry.id)!.body, historical);
+    });
   }
-  assert.equal((run(co, admin, "archive.list", {}) as Rec[]).filter(r => r.kind === "issue").length, 4);
-  const note = run(co, admin, "record.create", { kind: "issue_note", body: { title: "Unassigned question", project_id: ID.project } }) as Rec;
-  assert.equal(note.key, "ISN-0001");
-  assert.throws(() => run(co, admin, "record.create", { kind: "issue", body: { title: "shadow workflow" } }), code("forbidden"));
-  const other = companies.create("other-co", "Other");
-  assert.throws(() => run(other, admin, "record.get", { ref: "ISS-0001" }), code("not_found"));
-  assert.equal((run(other, admin, "record.create", { kind: "issue_note", body: { title: "Other question" } }) as Rec).key, "ISN-0001");
+});
+
+test("migration 2 -> 3: work orders become assignments with ids, keys, revisions, history, owners, results and links kept", (t) => {
+  const { dir, companies } = world(t);
+  const before = snapshot(dir);
+  assert.equal(before.version, "2");
+  const acme = companies.get("acme"); // opening the file runs the upgrade
+  const after = snapshot(dir);
+
+  assert.equal(after.version, "4");
+  assert.deepEqual(after.records, before.records, "ids, keys, revisions, times, authors and every other field stay as they were");
+  assert.deepEqual(after.revisions, before.revisions, "history is untouched (append-only), old bodies included");
+  assert.deepEqual(after.ops, before.ops, "the op ledger is untouched");
+  assert.deepEqual(after.counters, before.counters, "the WO counter stays; ASG starts fresh");
+
+  assert.deepEqual(acme.all<{ kind: string; prefix: string }>("select kind, prefix from kinds where kind in ('work_order', 'assignment')").map((k) => [k.kind, k.prefix]), [["assignment", "ASG"]]);
+  assert.deepEqual(JSON.parse(acme.one<{ refs: string }>("select refs from kinds where kind = 'entry'")!.refs), { about_id: null, project_id: "project", assignment_id: "assignment" });
+  assert.deepEqual(acme.all<{ key: string; kind: string }>("select key, kind from records where key like 'WO-%' order by key").map((r) => [r.key, r.kind]),
+    [["WO-0001", "assignment"], ["WO-0002", "assignment"], ["WO-001", "assignment"]]);
+  const entries = run(acme, admin, "record.list", { kind: "entry", archived: "all" }) as Rec[];
+  const assignmentOfEntry = new Map(entries.map((e) => [e.key, e.body.assignment_id]));
+  assert.deepEqual(Object.fromEntries(assignmentOfEntry), { "JNL-0001": ID.done, "JNL-0002": ID.open, "JNL-0003": ID.open, "JNL-0004": undefined });
+  assert.ok(entries.every((e) => !("work_order_id" in e.body)));
+  assert.deepEqual(acme.all<{ label: string; n: number }>("select label, count(*) as n from links group by label order by label").map((l) => [l.label, l.n]),
+    [["about", 3], ["assignment", 3], ["cites", 1], ["project", 2]]);
+  const summary = JSON.parse(acme.one<{ v: string }>("select v from meta where k = 'upgrade_3'")!.v) as Record<string, unknown>;
+  assert.deepEqual([summary.assignments, summary.relinked, summary.links, summary.kinds], [3, 3, 3, ["entry"]]);
+
+  // Old keys resolve everywhere, through the new and the old operations.
+  const done = run(acme, agent, "assignment.show", { ref: "WO-0001" }) as Assignment & { outcomes: { key: string }[]; sessions: unknown[]; actions: unknown[] };
+  assert.deepEqual([done.kind, done.key, done.owner, done.status, done.status_words, done.result, done.project, done.rev], ["assignment", "WO-0001", "hermes:acme", "done", "Result reported", "Label matches the formula", "PRJ-0001", 4]);
+  assert.deepEqual(done.outcomes.map((o) => o.key), ["JNL-0001"]);
+  assert.equal(done.verification.state, "not_verified", "a result reported before the rename is still only reported");
+  const open = run(acme, agent, "work.show", { ref: "wo-0002" }) as Order & { receipts: unknown[]; actions: unknown[] };
+  assert.deepEqual([open.status, open.progress, open.due_on, open.receipts.length, open.actions.length], ["in_progress", "Listed 3 campaigns", "2026-12-01", 1, 1]);
+  assert.equal((run(acme, agent, "record.get", { ref: "WO-001" }) as Rec).body.result, "Audit filed", "three-digit imported keys resolve too");
+  assert.equal(run(acme, agent, "record.history", { ref: "WO-0001" }) instanceof Array && (run(acme, agent, "record.history", { ref: "WO-0001" }) as Revision[]).map((v) => v.body.status).join(","), "queued,picked_up,in_progress,done");
+  assert.equal(((run(acme, agent, "record.links", { ref: "WO-0001" }) as { in: { key: string; label: string }[] }).in).map((l) => `${l.label}:${l.key}`).sort().join(" "), "about:JNL-0001 assignment:JNL-0001 cites:JNL-0004");
+  const journal = run(acme, agent, "journal.list", { since: "2026-01-01T00:00:00.000Z" }) as JournalItem[];
+  assert.deepEqual(journal.filter((j) => j.assignment).map((j) => [j.key, j.assignment, j.work_order]).sort(), [["JNL-0001", "WO-0001", "WO-0001"], ["JNL-0002", "WO-0002", "WO-0002"], ["JNL-0003", "WO-0002", "WO-0002"]]);
+  assert.deepEqual((run(acme, agent, "assignment.list", {}) as Assignment[]).map((a) => a.key), ["WO-0002"]);
+  assert.equal((run(acme, agent, "record.list", { kind: "work_order", archived: "all" }) as Rec[]).length, 3);
+  assert.equal((run(acme, agent, "record.search", { q: "campaigns", kind: "work_order" }) as { key: string }[])[0]?.key, "WO-0002");
+
+  // The open one carries on after the upgrade: owner only, then a report linked by assignment_id.
+  assert.throws(() => run(acme, stranger, "assignment.report", { ref: "WO-0002", result: "x" }), code("forbidden"));
+  run(acme, agent, "action.record", { action: "ads", detail: "Paused campaign 14", work_order: "WO-0002" });
+  const reported = run(acme, agent, "assignment.report", { ref: "WO-0002", result: "Paused 3 campaigns that spent with no sales" }) as Assignment;
+  assert.deepEqual([reported.key, reported.status, reported.rev, reported.reported_by], ["WO-0002", "done", 4, "hermes:acme"]);
+  const shown = run(acme, agent, "assignment.show", { ref: "WO-0002" }) as Assignment & { outcomes: unknown[]; actions: unknown[]; sessions: unknown[] };
+  assert.deepEqual([shown.outcomes.length, shown.actions.length, shown.sessions.length], [1, 2, 1]);
+
+  // New assignments get ASG keys; WO is never handed out again.
+  assert.equal((run(acme, admin, "record.create", { kind: "assignment", body: { title: "New one", owner: "hermes:acme" } }) as Rec).key, "ASG-0001");
+  assert.equal((run(acme, admin, "record.create", { kind: "work_order", body: { title: "Old caller", owner: "hermes:acme" } }) as Rec).key, "ASG-0002");
+  assert.equal(acme.one<{ next_n: number }>("select next_n from key_counters where prefix = 'WO'")?.next_n, 3);
+
+  // Undo of a change made after the upgrade reads old revisions under the new field names.
+  run(acme, admin, "record.patch", { ref: "JNL-0001", set: { assignment_id: "WO-0002" } });
+  assert.equal((run(acme, admin, "record.undo", { ref: "JNL-0001" }) as Rec).body.assignment_id, ID.done);
+
+  // The upgrade ran once: reopening changes nothing.
   companies.close();
-  const backup = join(dir, "after"); await backupDirectory(source, backup, true);
-  const restored = join(dir, "restored"); restoreDirectory(backup, restored);
-  const restoredCompanies = new Companies(restored);
-  assert.equal((run(restoredCompanies.get("acme"), admin, "record.history", { ref: "ISS-0004" }) as Revision[]).length, 2);
-  assert.equal((run(restoredCompanies.get("acme"), admin, "record.get", { ref: "ISN-0001" }) as Rec).kind, "issue_note"); restoredCompanies.close();
-  const rollback = join(dir, "rollback"); restoreDirectory(prior, rollback);
-  assert.deepEqual(dump(rollback), before);
-  const rolled = new NodeDb(companyFile(rollback, "acme"), { readOnly: true });
-  assert.equal(rolled.one<{v:string}>("select v from meta where k='schema_version'")!.v, "4"); rolled.close();
+  const again = new Companies(dir);
+  t.after(() => again.close());
+  assert.equal(again.get("acme").one<{ v: string }>("select v from meta where k = 'schema_version'")?.v, "4");
 });
 
-test("legacy migration derives assertion history and flags contradictory Journal scope without rewriting it", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "rs-legacy-provenance-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+test("migration 2 -> 3 refuses, changing nothing, when the company already has an assignment kind or uses ASG", (t) => {
+  for (const clash of [{ kind: "assignment", prefix: "ASN" }, { kind: "assessment", prefix: "ASG" }]) {
+    const { dir, companies } = world(t, [clash]);
+    const before = snapshot(dir);
+    assert.throws(() => companies.get("acme"), /cannot make work orders into assignments/);
+    const after = snapshot(dir);
+    assert.deepEqual(after, before, `${clash.kind}/${clash.prefix}: the file stays at schema 2, untouched`);
+  }
+});
+
+test("migration 2 -> 3 keeps companies apart: each file upgrades on its own and old keys never cross", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rs-mig-"));
+  schema2File(dir, "acme");
+  const companies = new Companies(dir);
+  t.after(() => { companies.close(); rmSync(dir, { recursive: true, force: true }); });
+  const other = companies.create("other-co", "Other Co");
+  assert.throws(() => run(other, admin, "assignment.show", { ref: "WO-0001" }), code("not_found"));
+  assert.equal((run(other, admin, "record.list", { kind: "assignment" }) as Rec[]).length, 0);
+  assert.equal((run(companies.get("acme"), admin, "assignment.list", { all: true }) as Assignment[]).length, 3);
+});
+
+
+test("schema 3 -> 4 preserves prior data, captures legacy authority, and survives backup/restore", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rs-mig4-"));
+  const opened: Companies[] = [];
+  t.after(() => { for (const companies of opened) companies.close(); rmSync(dir, { recursive: true, force: true }); });
   schema2File(dir, "acme");
   const db = new NodeDb(companyFile(dir, "acme"));
-  const bodies = [
-    { title: "Original", body: "Original assertion", project_id: ID.project },
-    { title: "Original", body: "Revised assertion", project_id: ID.project },
-    { title: "Retitled", body: "Revised assertion", project_id: ID.project, source: "Synthetic citation" },
-  ];
-  db.run("insert into records values ('legacy-learning','KNW-0001','knowledge',3,?,0,'2026-09-01','2026-09-03','alex')", JSON.stringify(bodies[2]));
-  for (const [i, body] of bodies.entries())
-    db.run("insert into revisions(record_id,rev,body,archived,changed,op,actor,actor_kind,at) values ('legacy-learning',?,?,0,'[]',?,?,?,?)", i + 1, JSON.stringify(body), i ? "patch" : "import", i === 1 ? "hermes:acme" : "alex", i === 1 ? "agent" : "person", `2026-09-0${i + 1}`);
-  db.run("insert into records values ('project-b','PRJ-0002','project',1,'{\"title\":\"Other project\"}',0,'2026-09-01','2026-09-01','alex')");
-  db.run("insert into revisions(record_id,rev,body,archived,changed,op,actor,actor_kind,at) values ('project-b',1,'{\"title\":\"Other project\"}',0,'[\"title\"]','create','alex','person','2026-09-01')");
-  db.run("update records set body=json_set(body,'$.about_id',?,'$.project_id','project-b') where id=?", ID.project, ID.note);
+  const upgrade3 = UPGRADES[3];
+  assert.equal(typeof upgrade3, "function");
+  (upgrade3 as (db: NodeDb) => void)(db);
+  db.run("update meta set v = '3' where k = 'schema_version'");
+  db.run("insert or ignore into agents (name, role, created_at) values (?, 'member', '2026-10-01T00:00:00.000Z')", stranger.name);
+  const put = (id: string, key: string, kind: string, body: Body) => {
+    const at = "2026-10-01T00:00:00.000Z";
+    db.run("insert into records values (?, ?, ?, 1, ?, 0, ?, ?, ?)", id, key, kind, JSON.stringify(body), at, at, agent.name);
+    db.run("insert into revisions (record_id, rev, body, archived, changed, op, actor, actor_kind, at) values (?, 1, ?, 0, ?, 'create', ?, 'agent', ?)", id, JSON.stringify(body), JSON.stringify(Object.keys(body)), agent.name, at);
+  };
+  const taskId = "0190a000-0000-7000-8000-000000000020";
+  const otherId = "0190a000-0000-7000-8000-000000000021";
+  const evidenceId = "0190a000-0000-7000-8000-000000000022";
+  put(otherId, "ASG-0100", "assignment", { title: "Other", owner: stranger.name, status: "queued" });
+  put(taskId, "TSK-0100", "task", { title: "Legacy step", assignment_id: ID.open });
+  const evidence = { title: "Legacy result", type: "outcome", about_id: taskId };
+  put(evidenceId, "JNL-0100", "entry", evidence);
+  const revise = (id: string, rev: number, body: Body) => {
+    db.run("update records set rev = ?, body = ? where id = ?", rev, JSON.stringify(body), id);
+    db.run("insert into revisions (record_id, rev, body, archived, changed, op, actor, actor_kind, at) values (?, ?, ?, 0, ?, 'patch', 'alex', 'person', '2026-10-02T00:00:00.000Z')", id, rev, JSON.stringify(body), JSON.stringify(["title", "assignment_id"]));
+  };
+  revise(taskId, 2, { title: "Legacy step", assignment_id: otherId });
+  revise(evidenceId, 2, { ...evidence, title: "Legacy edited result" });
+  revise(taskId, 3, { title: "Legacy step" });
+  db.run("insert into links (from_id, to_id, label) values (?, ?, 'about')", evidenceId, taskId);
+  db.exec("pragma wal_checkpoint(truncate)");
   db.close();
-  const before = dump(dir), companies = new Companies(dir), co = companies.get("acme");
-  t.after(() => companies.close());
-  assert.deepEqual(dump(dir), before);
-  const { projectContext } = await import("../src/core/context.ts");
-  const a = projectContext(co, ID.project), b = projectContext(co, "project-b");
-  const claim = a.knowledge[0]!;
-  assert.equal(claim.provenance.actor, "hermes:acme"); assert.equal(claim.provenance.rev, 2);
-  assert.equal(claim.last_edited.actor, "alex"); assert.equal(claim.citation_provenance.rev, 3);
-  assert.equal(claim.original.body.body, "Original assertion");
-  for (const context of [a, b]) {
-    assert.ok(!context.log.some(e => e.record.id === ID.note));
-    assert.equal(context.scope_conflicts[0]!.record.id, ID.note);
-  }
-  assert.equal((run(co, admin, "record.get", { ref: "JNL-0004" }) as Rec).body.project_id, "project-b");
-  assert.ok((run(co, admin, "journal.list", {}) as JournalItem[]).some(e => e.key === "JNL-0004"));
-  const legacyLinks = (run(co, admin, "record.get", { ref: "JNL-0004" }) as Rec).body;
-  const edited = run(co, admin, "record.patch", { ref: "JNL-0004", set: { title: "Legacy content correction" } }) as Rec;
-  assert.equal(edited.body.about_id, legacyLinks.about_id); assert.equal(edited.body.project_id, legacyLinks.project_id);
-  assert.throws(() => run(co, admin, "record.patch", { ref: "JNL-0004", set: { project_id: ID.project } }), /immutable/);
-  assert.equal(projectContext(co, ID.project).scope_conflicts[0]!.record.body.title, "Legacy content correction");
-
-});
-
-test("prior disposable schema 5 upgrades to distinct issue_note identity without changing old notes", (t) => {
-  const { dir, companies, acme } = setup(t);
-  const old = run(acme, admin, "record.create", { kind: "issue_note", body: { title: "Prior disposable note" } }) as Rec;
-  const migratedFact = run(acme, admin, "record.create", { kind: "fact", body: { title: "Original fact", subject: "Supplier", predicate: "lead_time", value_type: "number", value: 4 } }) as Rec;
-  run(acme, agent, "record.patch", { ref: migratedFact.id, set: { value: 6 } });
-  run(acme, admin, "record.patch", { ref: migratedFact.id, set: { title: "Retitled", source: "Synthetic citation" } });
+  const before = snapshot(dir);
+  const backup = join(dir, "prior.sqlite.backup");
+  copyFileSync(companyFile(dir, "acme"), backup);
+  const companies = new Companies(dir);
+  opened.push(companies);
+  const co = companies.get("acme");
+  const after = snapshot(dir);
+  assert.equal(after.version, "4");
+  for (const field of ["records", "revisions", "ops", "counters"] as const) assert.deepEqual(after[field], before[field]);
+  assert.deepEqual(co.all("select * from evidence_authority"), []);
+  assert.throws(() => run(co, stranger, "record.patch", { ref: "JNL-0100", set: { title: "Changed", authority: [] } }), code("forbidden"));
+  assert.throws(() => run(co, agent, "record.patch", { ref: "JNL-0100", set: { title: "Changed" } }), code("forbidden"));
+  run(co, stranger, "record.patch", { ref: "TSK-0100", set: { title: "Shared again" } });
+  run(co, admin, "record.patch", { ref: "JNL-0100", set: { title: "Person reviewed", actor: stranger.name, assignment_ids: [] } });
+  const authority = JSON.parse(co.one<{ assignment_ids: string }>("select assignment_ids from evidence_authority where record_id = ?", evidenceId)!.assignment_ids) as string[];
+  assert.deepEqual(authority.sort(), [ID.open, otherId].sort());
+  const hist = run(co, admin, "record.history", { ref: "JNL-0100" }) as Revision[];
+  assert.equal(hist.at(-1)!.actor, admin.name);
+  co.run("pragma wal_checkpoint(truncate)");
   companies.close();
-  const db = new NodeDb(companyFile(dir, "acme"));
-  db.run("insert into kinds select 'issue','ISS',title_field,statuses,refs from kinds where kind='issue_note'");
-  db.run("update records set kind='issue',key='ISS-0001' where id=?", old.id);
-  db.run("delete from kinds where kind='issue_note'");
-  db.run("update records_fts set key='ISS-0001' where id=?", old.id);
-  db.run("update key_counters set prefix='ISS' where prefix='ISN'");
-  db.run("update meta set v='5' where k='schema_version'"); db.close();
-  const before = dump(dir), upgraded = new Companies(dir);
-  t.after(() => upgraded.close());
-  const co = upgraded.get("acme"); assert.deepEqual(dump(dir), before);
-  assert.equal((run(co, admin, "record.get", { ref: "ISS-0001" }) as Rec).id, old.id);
-  assert.equal((run(co, admin, "archive.list", {}) as Rec[]).length, 1);
-  const context = run(co, admin, "record.context", { ref: migratedFact.id }) as ReturnType<typeof import("../src/core/records.ts").provenance>;
-  assert.equal(context.provenance.actor, agent.name); assert.equal(context.provenance.rev, 2);
-  assert.equal(context.last_edited.actor, admin.name); assert.equal(context.citation_provenance.rev, 3);
-  assert.equal(context.original.body.value, 4);
-
-  assert.equal((run(co, admin, "record.create", { kind: "issue_note", body: { title: "New note" } }) as Rec).kind, "issue_note");
+  const restored = join(dir, "restored");
+  mkdirSync(restored);
+  copyFileSync(companyFile(dir, "acme"), companyFile(restored, "acme"));
+  const restoredCompanies = new Companies(restored);
+  opened.push(restoredCompanies);
+  const restoredCo = restoredCompanies.get("acme");
+  assert.throws(() => run(restoredCo, stranger, "record.patch", { ref: "JNL-0100", set: { title: "Changed" } }), code("forbidden"));
+  assert.deepEqual(JSON.parse(restoredCo.one<{ assignment_ids: string }>("select assignment_ids from evidence_authority where record_id = ?", evidenceId)!.assignment_ids), authority);
+  const rollback = join(dir, "rollback");
+  mkdirSync(rollback);
+  copyFileSync(backup, companyFile(rollback, "acme"));
+  assert.deepEqual(snapshot(rollback), before, "a pre-upgrade backup restores the complete prior database");
+  const rollbackCompanies = new Companies(rollback);
+  opened.push(rollbackCompanies);
+  const rollbackCo = rollbackCompanies.get("acme");
+  assert.equal(rollbackCo.one<{ v: string }>("select v from meta where k = 'schema_version'")!.v, "4");
+  assert.throws(() => run(rollbackCo, stranger, "record.patch", { ref: "JNL-0100", set: { title: "Changed" } }), code("forbidden"));
 });

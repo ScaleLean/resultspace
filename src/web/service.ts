@@ -3,7 +3,6 @@
 // Every method except signIn and useReset refuses when nobody is signed in.
 import type { IncomingMessage } from "node:http";
 import type { Companies } from "../core/companies.ts";
-import { assertWritable } from "../core/read-only.ts";
 import { forbidden, RsError } from "../core/errors.ts";
 import { cookieOf, passwordProblem, RateLimit, SESSION_COOKIE, SESSION_DAYS, type Done, type People, type Person } from "../core/people.ts";
 import type { ChatState, Curator, RunReport } from "../curator/curator.ts";
@@ -18,7 +17,6 @@ export type CuratorView = { available: boolean; settings: CuratorSettings; spent
 export type WebService = {
   /** The signed-in person, or null. In trusted mode (loopback, tailnet) the owner, without signing in. */
   person: Person | null;
-  readOnly: boolean;
   /** "trusted": this request needs no sign-in (same machine or tailnet). "signin": it does. */
   mode: "trusted" | "signin";
   /** True on first run: no company yet (trusted), or no account yet (sign-in). The web app then shows set-up. */
@@ -76,15 +74,12 @@ export function webFor(req: IncomingMessage, deps: WebDeps): WebService {
   const ip = clientIp(req);
   const me = (): Person => { if (!person) throw forbidden("sign in first"); return person; };
   const company = (slug: string) => { me(); return companies.get(slug); };
-  const writable = () => assertWritable(companies.readOnly);
   const empty: ChatState = { busy: false, messages: [], partial: null, tools: [] };
   return {
     person,
-    readOnly: companies.readOnly,
     mode: deps.trusted ? "trusted" : "signin",
     needsSetup: deps.trusted ? companies.slugs().length === 0 : !people.any(),
     createCompany(slug, name) {
-      writable();
       me();
       if (!SLUG.test(slug)) return { ok: false, error: "A slug is lower-case letters, digits and dashes, like acme or north-wind." };
       if (!name.trim()) return { ok: false, error: "Give the company a name." };
@@ -94,7 +89,6 @@ export function webFor(req: IncomingMessage, deps: WebDeps): WebService {
       status() { me(); return { set: !!process.env.FIREWORKS_API_KEY, curator: curator.available }; },
       async test(key) { me(); return testModelKey(key); },
       async set(key) {
-        writable();
         me();
         const t = await testModelKey(key);
         if (!t.ok) return t;
@@ -103,24 +97,21 @@ export function webFor(req: IncomingMessage, deps: WebDeps): WebService {
       },
     },
     async setup(name, email, password) {
-      writable();
       if (people.any()) return { ok: false, error: "This server is already set up." };
       try { await people.add(name, email, { password }); } catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
       const t = await people.signIn(email, password, ip);
       return t ? { ok: true, cookie: cookie(req, t, SESSION_DAYS * 86400) } : { ok: false, error: "Could not sign in." };
     },
     async signIn(email, password) {
-      writable();
       if (limiter.blocked(ip, email)) return { ok: false, error: "Too many tries. Wait 15 minutes and try again.", status: 429 };
       const t = await people.signIn(email, password, ip);
       if (!t) { limiter.fail(ip, email); return { ok: false, error: "That email and password do not match.", status: 401 }; }
       limiter.ok(ip, email);
       return { ok: true, cookie: cookie(req, t, SESSION_DAYS * 86400) };
     },
-    signOut() { writable(); if (token) people.signOut(token, ip); return { cookie: cookie(req, "", 0) }; },
+    signOut() { if (token) people.signOut(token, ip); return { cookie: cookie(req, "", 0) }; },
     access() { me(); const a = people.list()[0]; return { mode: deps.trusted ? "trusted" : "signin", account: a ? { name: a.name, email: a.email } : null }; },
     async setAccount(name, email, password, again) {
-      writable();
       me();
       if (!deps.trusted) return { ok: false, error: "Only from the machine that runs ResultSpace, or its network." };
       if (people.any()) return { ok: false, error: "There is already an account. Set its password instead." };
@@ -129,16 +120,14 @@ export function webFor(req: IncomingMessage, deps: WebDeps): WebService {
       try { await people.add(name, email, { password }); return { ok: true }; } catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
     },
     async setPassword(next, again) {
-      writable();
       me();
       if (!deps.trusted) return { ok: false, error: "Only from the machine that runs ResultSpace, or its network. Use the current password here." };
       const a = people.list()[0];
       if (!a) return { ok: false, error: "There is no account yet." };
       return people.setPasswordOf(a.name, next, again);
     },
-    async changePassword(current, next, again) { writable(); me(); return people.changePassword(token!, current, next, again, ip); },
+    async changePassword(current, next, again) { me(); return people.changePassword(token!, current, next, again, ip); },
     async useReset(resetToken, next, again) {
-      writable();
       if (limiter.blocked(ip, "#reset")) return { ok: false, error: "Too many tries. Wait 15 minutes and try again." };
       const r = await people.useReset(resetToken, next, again, ip);
       if (!r.ok) limiter.fail(ip, "#reset");
@@ -153,26 +142,21 @@ export function webFor(req: IncomingMessage, deps: WebDeps): WebService {
     curator: {
       async view(slug) {
         const co = company(slug);
-        if (!curator.available) return {
-          available: false, settings: getSettings(co), spent_today: 0, chat: empty,
-          runs: companies.readOnly ? co.all<CuratorView["runs"][number]>("select * from curator_runs order by id desc limit 50") : [],
-        };
+        if (!curator.available) return { available: false, settings: getSettings(co), spent_today: 0, chat: empty, runs: [] };
         const c = await curator.for(slug);
         return { available: true, settings: getSettings(co), spent_today: await c.spentToday(), chat: await c.chat(), runs: c.runs() };
       },
       async chat(slug) { company(slug); return curator.available ? (await curator.for(slug)).chat() : empty; },
       async say(slug, text, steer = false) {
-        writable();
         company(slug);
         if (!curator.available) return { ok: false, error: "The Curator is off: this server has no model key (FIREWORKS_API_KEY)." };
         if (!text.trim()) return { ok: false, error: "Say something first." };
         return (await curator.for(slug)).say(text.slice(0, 8000), steer);
       },
-      async stop(slug) { writable(); company(slug); if (curator.available) await (await curator.for(slug)).stop(); },
-      async newChat(slug) { writable(); company(slug); if (curator.available) await (await curator.for(slug)).newChat(); },
-      saveSettings(slug, change) { writable(); return saveSettings(company(slug), change); },
+      async stop(slug) { company(slug); if (curator.available) await (await curator.for(slug)).stop(); },
+      async newChat(slug) { company(slug); if (curator.available) await (await curator.for(slug)).newChat(); },
+      saveSettings(slug, change) { return saveSettings(company(slug), change); },
       async runDuty(slug, duty) {
-        writable();
         company(slug);
         if (!curator.available) return null;
         const c = await curator.for(slug);

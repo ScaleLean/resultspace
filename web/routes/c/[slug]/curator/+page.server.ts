@@ -2,25 +2,14 @@
 // Actions (plain forms, so they work without JavaScript): say { text, steer? }, stop, new.
 // While the page is open it also polls GET /api/c/<slug>/chat for the newest state.
 import type { Actions, PageServerLoad } from "./$types";
-import type { Finding } from "../../../../../src/curator/scan.ts";
-import type { Rec } from "../../../../../src/core/records.ts";
-import { need, fail_of, str } from "#lib/server/rs.ts";
+import { fail_of, str } from "#lib/server/rs.ts";
 
 export const load: PageServerLoad = async ({ locals, params }) => {
   const v = await locals.rs.curator.view(params.slug);
-  return {
-    findings: need(locals.rs.run<Finding[]>(params.slug, "curator.scan")),
-    flags: need(locals.rs.run<Rec[]>(params.slug, "record.list", { kind: "flag", status: "open", limit: 200 })),
-    available: v.available,
-    chat: v.chat,
-  };
+  return { available: v.available, chat: v.chat };
 };
 
 export const actions: Actions = {
-  review: ({ locals, params }) => {
-    const r = locals.rs.run(params.slug, "curator.review");
-    return r.ok ? { ok: true } : fail_of(r);
-  },
   say: async ({ locals, params, request }) => {
     const form = await request.formData();
     const text = str(form, "text");

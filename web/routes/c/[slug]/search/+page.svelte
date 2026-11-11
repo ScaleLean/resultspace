@@ -22,12 +22,8 @@
   {#if data.q}
     {#if kinds.length > 1}
       <nav class="filters" aria-label="Kind">
-        <button type="button" class="chip" class:on={!only} onclick={() => (only = "")}
-          >All <span class="n">{data.hits.length}</span></button
-        >
-        {#each kinds as k}<button type="button" class="chip" class:on={only === k} onclick={() => (only = k)}
-            >{k === "entry" ? "journal" : words(k)} <span class="n">{data.hits.filter((h) => h.kind === k).length}</span></button
-          >{/each}
+        <button type="button" class="chip" class:on={!only} onclick={() => (only = "")}>All <span class="n">{data.hits.length}</span></button>
+        {#each kinds as k}<button type="button" class="chip" class:on={only === k} onclick={() => (only = k)}>{k === "entry" ? "journal" : words(k)} <span class="n">{data.hits.filter((h) => h.kind === k).length}</span></button>{/each}
       </nav>
     {/if}
     {#if hits.length}
@@ -48,44 +44,16 @@
       <p class="empty">Nothing found for “{data.q}”. Try fewer or shorter words.</p>
     {/if}
   {:else}
-    <p class="muted">Search projects, facts, learning, log and issue notes. Words match the start of longer words.</p>
+    <p class="muted">Search goals, projects, tasks, the Journal, knowledge and skills. Words match the start of longer words.</p>
   {/if}
 </div>
 
 <style>
-  .find {
-    display: flex;
-    align-items: center;
-    margin: 0 0 16px;
-    position: relative;
-  }
-  .find .ic {
-    position: absolute;
-    left: 13px;
-    color: var(--faint);
-    pointer-events: none;
-  }
-  .find input {
-    flex: 1;
-    min-width: 0;
-    padding-left: 42px;
-  }
-  .filters button {
-    font: inherit;
-    cursor: pointer;
-  }
-  .hit {
-    align-items: flex-start;
-  }
-  .ctx {
-    font-size: 12px;
-    color: var(--dim);
-  }
-  .hit :global(.snip) {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    overflow: hidden;
-  }
+  .find { display: flex; align-items: center; margin: 0 0 16px; position: relative; }
+  .find .ic { position: absolute; left: 13px; color: var(--faint); pointer-events: none; }
+  .find input { flex: 1; min-width: 0; padding-left: 42px; }
+  .filters button { font: inherit; cursor: pointer; }
+  .hit { align-items: flex-start; }
+  .ctx { font-size: 12px; color: var(--dim); }
+  .hit :global(.snip) { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 </style>

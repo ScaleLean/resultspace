@@ -10,8 +10,7 @@ const toolName = (op: string) => op.replace(/\./g, "_");
 const byTool = new Map(operations.map((o) => [toolName(o.name), o]));
 
 type Rpc = { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: unknown };
-const obj = (v: unknown): Record<string, unknown> =>
-  v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+const obj = (v: unknown): Record<string, unknown> => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 
 function answer(caller: Caller, method: string, params: Record<string, unknown>): unknown {
   switch (method) {
@@ -27,10 +26,8 @@ function answer(caller: Caller, method: string, params: Record<string, unknown>)
     case "tools/list":
       return {
         // Old names kept as aliases (work.*) still answer tools/call, but are not offered.
-        tools: operations.map((o) => ({
-          name: toolName(o.name),
-          description: o.summary,
-          inputSchema: o.input,
+        tools: operations.filter((o) => !o.replacedBy).map((o) => ({
+          name: toolName(o.name), description: o.summary, inputSchema: o.input,
           annotations: { readOnlyHint: !o.write, destructiveHint: false },
         })),
       };
@@ -55,10 +52,7 @@ export async function handleMcp(caller: Caller, req: IncomingMessage, res: Serve
   if (req.method !== "POST") return send(res, 405, { error: { code: "invalid", message: "POST one JSON-RPC message" } });
   const msg = obj(await readJson(req)) as Rpc;
   const method = typeof msg.method === "string" ? msg.method : "";
-  if (msg.id === undefined || msg.id === null) {
-    res.writeHead(202).end();
-    return;
-  } // a notification: nothing to answer
+  if (msg.id === undefined || msg.id === null) { res.writeHead(202).end(); return; } // a notification: nothing to answer
   try {
     send(res, 200, { jsonrpc: "2.0", id: msg.id, result: answer(caller, method, obj(msg.params)) });
   } catch (e) {

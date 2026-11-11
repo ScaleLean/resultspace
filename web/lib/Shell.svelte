@@ -1,10 +1,10 @@
-<!-- The app frame. Desktop: a rail with Home (every company), then each company with open findings;
+<!-- The app frame. Desktop: a rail with Home (every company), then each company with a live dot and what waits;
      the open company unfolds into its sections. Phone: a top bar, and inside a company a tab bar.
        <Shell companies={data.rail} slug={data.slug}>…page…</Shell>      (slug null = the home page) -->
 <script lang="ts">
   import { page } from "$app/state";
   import type { Snippet } from "svelte";
-  type RailCompany = { slug: string; name: string; needs: number };
+  import type { RailCompany } from "./server/pulse.ts";
   let { companies, slug = null, children }: { companies: RailCompany[]; slug?: string | null; children: Snippet } = $props();
 
   const ICON: Record<string, string> = {
@@ -13,6 +13,7 @@
     curator: "M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2z",
     journal: "M6 4h12v16H6z M9 8h6 M9 12h6 M9 16h3",
     work: "M4 8h16v11H4z M9 8V5h6v3",
+    skills: "M12 3l2.5 5 5.5.8-4 3.9.9 5.5L12 15.6 7.1 18.2l.9-5.5-4-3.9 5.5-.8z",
     knowledge: "M4 5h7a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H4z M20 5h-7 M20 5v13h-7",
     search: "M11 4a7 7 0 1 0 0 14a7 7 0 0 0 0-14z M20 20l-4-4",
     activity: "M3 12h4l3-8 4 16 3-8h4",
@@ -24,57 +25,33 @@
   const current = $derived(companies.find((c) => c.slug === slug) ?? null);
   const total = $derived(companies.reduce((n, c) => n + c.needs, 0));
   const base = $derived(slug ? `/c/${slug}` : "");
-  const sections = $derived(
-    slug
-      ? [
-          { id: "today", label: "Overview", href: base },
-          { id: "work", label: "Projects", href: `${base}/projects` },
-          { id: "journal", label: "Log", href: `${base}/journal` },
-          { id: "knowledge", label: "Knowledge", href: `${base}/knowledge` },
-          { id: "knowledge", label: "Facts", href: `${base}/facts` },
-          { id: "knowledge", label: "Sources", href: `${base}/sources` },
-          { id: "journal", label: "Issue notes", href: `${base}/issues` },
-          { id: "journal", label: "Legacy archive", href: `${base}/archive` },
-          { id: "curator", label: "Curator", href: `${base}/curator` },
-          { id: "search", label: "Search", href: `${base}/search` },
-          { id: "activity", label: "Activity", href: `${base}/activity` },
-          { id: "admin", label: "Admin", href: `${base}/admin` },
-        ]
-      : [],
-  );
-  const tabs = $derived(
-    slug
-      ? [
-          { id: "home", label: "Home", href: "/" },
-          { id: "today", label: "Overview", href: base },
-          { id: "work", label: "Projects", href: `${base}/projects` },
-          { id: "journal", label: "Log", href: `${base}/journal` },
-          { id: "more", label: "More", href: `${base}/more` },
-        ]
-      : [],
-  );
+  const sections = $derived(slug ? [
+    { id: "today", label: "Overview", href: base },
+    { id: "work", label: "Work", href: `${base}/work` },
+    { id: "journal", label: "Journal", href: `${base}/journal` },
+    { id: "knowledge", label: "Knowledge", href: `${base}/knowledge` },
+    { id: "skills", label: "Skills", href: `${base}/skills` },
+    { id: "curator", label: "Curator", href: `${base}/curator` },
+    { id: "search", label: "Search", href: `${base}/search` },
+    { id: "activity", label: "Activity", href: `${base}/activity` },
+    { id: "admin", label: "Admin", href: `${base}/admin` },
+  ] : []);
+  const tabs = $derived(slug ? [
+    { id: "home", label: "Home", href: "/" },
+    { id: "today", label: "Overview", href: base },
+    { id: "work", label: "Work", href: `${base}/work` },
+    { id: "journal", label: "Journal", href: `${base}/journal` },
+    { id: "more", label: "More", href: `${base}/more` },
+  ] : []);
   const path = $derived(page.url.pathname);
-  const on = (href: string) =>
-    href === base || href === "/" ? path === href || path === `${href}/` : path === href || path.startsWith(href + "/");
+  const on = (href: string) => (href === base || href === "/" ? path === href || path === `${href}/` : path === href || path.startsWith(href + "/"));
   const tabOn = (t: { id: string; href: string }) => (t.id === "more" ? !tabs.some((x) => x.id !== "more" && on(x.href)) : on(t.href));
-  const hue = (s: string) => {
-    let h = 0;
-    for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-    return h % 360;
-  };
-  const initials = (n: string) =>
-    n
-      .split(/\s+/)
-      .map((w) => w[0])
-      .join("")
-      .slice(0, 2)
-      .toUpperCase();
+  const hue = (s: string) => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
+  const initials = (n: string) => n.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
 </script>
 
 {#snippet ic(id: string)}<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d={ICON[id]} /></svg>{/snippet}
-{#snippet mark(c: RailCompany, size = 24)}<span class="mark" style="--h:{hue(c.slug)};width:{size}px;height:{size}px"
-    >{initials(c.name)}</span
-  >{/snippet}
+{#snippet mark(c: RailCompany, size = 24)}<span class="mark" style="--h:{hue(c.slug)};width:{size}px;height:{size}px">{initials(c.name)}</span>{/snippet}
 
 <div class="shell">
   <nav class="rail" aria-label="Companies">
@@ -86,13 +63,11 @@
     {#each companies as c (c.slug)}
       <a class="co" class:open={c.slug === slug} href="/c/{c.slug}">
         {@render mark(c)}<span class="nm">{c.name}</span>
-        {#if c.needs}<span class="badge" title="Open findings">{c.needs}</span>{/if}
+        {#if c.needs}<span class="badge">{c.needs}</span>{:else}<span class="dot {c.working ? 'live' : 'quiet'}" title={c.working ? "Agent working now" : "Agent idle"}></span>{/if}
       </a>
       {#if c.slug === slug}
         <div class="sections">
-          {#each sections as n}<a class="nav sub" class:on={on(n.href)} href={n.href} aria-current={on(n.href) ? "page" : undefined}
-              >{@render ic(n.id)}<span>{n.label}</span></a
-            >{/each}
+          {#each sections as n}<a class="nav sub" class:on={on(n.href)} href={n.href} aria-current={on(n.href) ? "page" : undefined}>{@render ic(n.id)}<span>{n.label}</span></a>{/each}
         </div>
       {/if}
     {/each}
@@ -127,99 +102,19 @@
 </div>
 
 <style>
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 8px 18px;
-    text-decoration: none;
-    font-weight: 680;
-    letter-spacing: -0.03em;
-    font-size: 15px;
-  }
-  .logo {
-    width: 26px;
-    height: 26px;
-    border-radius: 6px;
-    display: grid;
-    place-items: center;
-    background: var(--teal);
-    color: #0d201c;
-    font: 700 11px var(--mono);
-    flex: none;
-  }
-  .co {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-height: 40px;
-    padding: 0 10px;
-    border-radius: 6px;
-    text-decoration: none;
-    color: var(--ink-2);
-    font-size: 14px;
-    font-weight: 520;
-  }
-  .co:hover {
-    background: var(--hover);
-    color: var(--ink);
-  }
-  .co.open {
-    color: var(--ink);
-    font-weight: 620;
-  }
-  .co .nm {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .co .badge {
-    margin-left: 0;
-  }
-  .mark {
-    border-radius: 5px;
-    display: grid;
-    place-items: center;
-    flex: none;
-    font: 650 10px var(--mono);
-    letter-spacing: 0;
-    color: hsl(var(--h) 55% 80%);
-    background: hsl(var(--h) 28% 19%);
-    box-shadow: inset 0 0 0 1px hsl(var(--h) 30% 28%);
-  }
-  .sections {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    margin: 2px 0 8px 21px;
-    padding-left: 10px;
-    border-left: 1px solid var(--line);
-  }
-  .nav.sub {
-    min-height: 34px;
-    font-size: 13.5px;
-  }
-  .nav.sub :global(svg.ic) {
-    width: 17px;
-    height: 17px;
-  }
-  .top-nm {
-    flex: 1;
-    min-width: 0;
-    font-weight: 640;
-    letter-spacing: -0.02em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .top .logo {
-    margin-left: 6px;
-  }
-  @media (max-width: 820px) {
-    .main:not(.has-tabs) {
-      padding-bottom: 24px;
-    }
-  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 18px; text-decoration: none; font-weight: 680; letter-spacing: -.03em; font-size: 15px; }
+  .logo { width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center; background: var(--teal); color: #0d201c; font: 700 11px var(--mono); flex: none; }
+  .co { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 10px; border-radius: 6px; text-decoration: none; color: var(--ink-2); font-size: 14px; font-weight: 520; }
+  .co:hover { background: var(--hover); color: var(--ink); }
+  .co.open { color: var(--ink); font-weight: 620; }
+  .co .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .co .badge { margin-left: 0; }
+  .mark { border-radius: 5px; display: grid; place-items: center; flex: none; font: 650 10px var(--mono); letter-spacing: 0;
+    color: hsl(var(--h) 55% 80%); background: hsl(var(--h) 28% 19%); box-shadow: inset 0 0 0 1px hsl(var(--h) 30% 28%); }
+  .sections { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 8px 21px; padding-left: 10px; border-left: 1px solid var(--line); }
+  .nav.sub { min-height: 34px; font-size: 13.5px; }
+  .nav.sub :global(svg.ic) { width: 17px; height: 17px; }
+  .top-nm { flex: 1; min-width: 0; font-weight: 640; letter-spacing: -.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .top .logo { margin-left: 6px; }
+  @media (max-width: 820px) { .main:not(.has-tabs) { padding-bottom: 24px; } }
 </style>
